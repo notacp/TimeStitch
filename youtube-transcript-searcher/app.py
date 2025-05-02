@@ -1,16 +1,15 @@
 import os
 from dotenv import load_dotenv
 import sys
-import asyncio
 import re
+import time # Added for sleep in retries
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
-from typing import List, Tuple, Optional, Dict, Any, AsyncGenerator, Union
-from datetime import datetime, date, timezone # Added for potential future date parsing/filtering
+# from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type # Removed tenacity
+from typing import List, Tuple, Optional, Dict, Any, Union # Removed AsyncGenerator
+from datetime import datetime, date, timezone
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import gradio as gr
-import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -116,7 +115,7 @@ def _extract_channel_id(channel_url_or_id: str, api_key: str) -> str | None:
     return None
 
 
-def _fetch_playlist_id_sync(channel_id: str, api_key: str) -> str:
+def fetch_playlist_id(channel_id: str, api_key: str) -> str:
     """Synchronous function to fetch uploads playlist ID."""
     if not api_key:
         raise ValueError("YouTube API Key is not configured.")
@@ -140,13 +139,12 @@ def _fetch_playlist_id_sync(channel_id: str, api_key: str) -> str:
         return uploads_playlist_id
 
     except HttpError as e:
-        raise YouTubeChannelError(f"YouTube API error: {e.resp.status} {e.content.decode()}") from e
+        raise YouTubeChannelError(f"YouTube API error fetching playlist ID: {e.resp.status} {e.content.decode()}") from e
     except Exception as e:
-        # Catch potential other errors during build or execution
         raise YouTubeChannelError(f"An unexpected error occurred fetching playlist ID: {e}") from e
 
 
-def _fetch_video_ids_page_sync(playlist_id: str, api_key: str, page_token: Optional[str] = None) -> Tuple[List[Tuple[str, str, str]], Optional[str]]:
+def _fetch_video_details_page(playlist_id: str, api_key: str, page_token: Optional[str] = None) -> Tuple[List[Tuple[str, str, str]], Optional[str]]:
     """Fetches one page of video IDs, published dates, and titles from a playlist."""
     if not api_key:
         raise ValueError("YouTube API Key is not configured.")
@@ -176,9 +174,49 @@ def _fetch_video_ids_page_sync(playlist_id: str, api_key: str, page_token: Optio
         return video_details, next_page_token
 
     except HttpError as e:
-        raise YouTubeChannelError(f"YouTube API error fetching video IDs: {e.resp.status} {e.content.decode()}") from e
+        raise YouTubeChannelError(f"YouTube API error fetching video details page: {e.resp.status} {e.content.decode()}") from e
     except Exception as e:
-        raise YouTubeChannelError(f"An unexpected error occurred fetching video IDs: {e}") from e
+        raise YouTubeChannelError(f"An unexpected error occurred fetching video details page: {e}") from e
+
+
+def fetch_all_video_details(playlist_id: str, api_key: str, max_videos: int) -> List[Tuple[str, str, str]]:
+    """Fetches all video details (ID, publishedAt, title) handling pagination and retries."""
+    print(f"Fetching up to {max_videos} video details for playlist: {playlist_id}")
+    all_details = []
+    next_page_token = None
+    fetch_attempt = 0
+    max_fetch_attempts = RETRY_ATTEMPTS # Use constant
+
+    while True:
+        try:
+            print(f"Fetching video details page... (token: {next_page_token})")
+            details_page, next_page_token = _fetch_video_details_page(
+                playlist_id, api_key, next_page_token
+            )
+            print(f"Fetched {len(details_page)} video details this page.")
+            all_details.extend(details_page)
+
+            if len(all_details) >= max_videos:
+                print(f"Reached max_videos limit ({max_videos}).")
+                break
+            if not next_page_token:
+                print("No more pages.")
+                break
+            fetch_attempt = 0 # Reset attempts on success
+        except YouTubeChannelError as e:
+            fetch_attempt += 1
+            print(f"Error fetching video details page: {e}. Attempt {fetch_attempt}/{max_fetch_attempts}", file=sys.stderr)
+            if fetch_attempt >= max_fetch_attempts:
+                raise YouTubeChannelError(f"Failed to fetch video details after {max_fetch_attempts} attempts.") from e
+            time.sleep(RETRY_WAIT_SECONDS) # Use constant
+        except Exception as e:
+            print(f"Unexpected error during video details fetch pagination: {e}", file=sys.stderr)
+            raise # Reraise unexpected errors immediately
+
+    # Truncate and return
+    final_details = all_details[:max_videos]
+    print(f"Finished fetching. Total video details collected: {len(final_details)}")
+    return final_details
 
 
 # --- Transcript Fetching ---
@@ -189,7 +227,7 @@ _transcript_cache: Dict[str, List[Dict[str, Any]]] = {}
 class TranscriptFetchError(Exception):
     pass
 
-def _fetch_transcript_sync(video_id: str) -> List[Dict[str, Any]]:
+def fetch_transcript(video_id: str) -> List[Dict[str, Any]]:
     """Synchronous function to fetch a transcript for a given video ID."""
     print(f"Attempting synchronous transcript fetch for video ID: {video_id}")
     try:
@@ -284,7 +322,64 @@ def parse_date(date_input: Union[str, None]) -> Optional[datetime]:
     
     return None
 
-# Change to synchronous function, update return type if needed (already string)
+def _process_single_video(video_id: str, title: str, pub_date_str: str, keyword: str) -> List[str]:
+    """Processes a single video: fetch transcript (with cache & retry), search, format results."""
+    video_results = []
+    print(f"[{video_id}] Processing '{title}'... Check cache.")
+    try:
+        # Check cache synchronously
+        if video_id in _transcript_cache:
+            print(f"Cache hit for transcript: {video_id}")
+            transcript = _transcript_cache[video_id]
+        else:
+            print(f"Cache miss. Fetching transcript sync for: {video_id}")
+            # Call the sync helper directly + Add manual retry logic
+            transcript_fetch_attempt = 0
+            transcript = None
+            last_transcript_error = None
+            while transcript_fetch_attempt < RETRY_ATTEMPTS:
+                try:
+                    transcript = fetch_transcript(video_id) # Use renamed function
+                    break # Success
+                except TranscriptFetchError as e:
+                    transcript_fetch_attempt += 1
+                    last_transcript_error = e
+                    print(f"Transcript fetch error attempt {transcript_fetch_attempt}/{RETRY_ATTEMPTS} for {video_id}: {e}", file=sys.stderr)
+                    if transcript_fetch_attempt < RETRY_ATTEMPTS:
+                        time.sleep(RETRY_WAIT_SECONDS)
+                except Exception as e: # Catch other potential errors
+                    last_transcript_error = e
+                    print(f"Unexpected transcript fetch error for {video_id}: {e}", file=sys.stderr)
+                    break # Don't retry unexpected errors
+            
+            if transcript is None:
+                # Raise the error to be caught by the outer loop
+                raise last_transcript_error or TranscriptFetchError(f"Failed to fetch transcript for {video_id} after retries.")
+
+            _transcript_cache[video_id] = transcript # Cache result
+            print(f"Successfully fetched and cached transcript for: {video_id} ('{title}')")
+
+        print(f"[{video_id}] Transcript obtained for '{title}'. Searching for '{keyword}'...")
+        matches = search_in_transcript(transcript, keyword)
+        print(f"[{video_id}] Search complete for '{title}'. Found {len(matches)} matches.")
+
+        if matches:
+            # Format results for this video
+            video_results.append(f"### [{title}](https://www.youtube.com/watch?v={video_id})\n")
+            for segment in matches:
+                 start_time = segment.get('start', 0)
+                 minutes = int(start_time // 60)
+                 seconds = int(start_time % 60)
+                 video_results.append(f"- [{minutes:02d}:{seconds:02d}](https://www.youtube.com/watch?v={video_id}&t={int(start_time)}s): {segment['text']}\n")
+            video_results.append("\n---\n")
+        
+        return video_results # Return formatted results list for this video
+
+    except Exception as e:
+        # Catch errors for this specific video and return a formatted warning string list
+        print(f"[{video_id}] Error processing '{title}': {e}", file=sys.stderr)
+        return [f"⚠️ Skipping video [{title}](https://www.youtube.com/watch?v={video_id}): `{e}`\n"]
+
 def process_channel_search(
     channel_url_or_id: str,
     start_date_input: str,
@@ -323,68 +418,28 @@ def process_channel_search(
 
 
     try:
-        # 2. Get Playlist ID (Synchronous Call)
+        # 2. Get Playlist ID
         progress(0.05, desc="Fetching channel info...")
-        # Extract/resolve channel ID first (synchronous)
-        channel_id = _extract_channel_id(channel_url_or_id, YT_API_KEY) # Pass API key
-        if not channel_id:
-            # Use a more specific error message if extraction/resolution failed
-             return f"❌ Error: Could not extract or resolve a valid YouTube Channel ID from the input: '{channel_url_or_id}'. Please check the URL or ID."
-
-        # If channel_id was successfully found, proceed to get playlist ID
-        if not YT_API_KEY: # This check is somewhat redundant now but safe to keep
-             raise ValueError("YT_API_KEY is not set in environment variables.")
-        playlist_id = _fetch_playlist_id_sync(channel_id, YT_API_KEY)
+        channel_id = _extract_channel_id(channel_url_or_id, YT_API_KEY)
+        if not channel_id: return f"❌ Error: Could not extract or resolve a valid YouTube Channel ID from the input: '{channel_url_or_id}'. Please check the URL or ID."
+        if not YT_API_KEY: raise ValueError("YT_API_KEY is not set in environment variables.")
+        playlist_id = fetch_playlist_id(channel_id, YT_API_KEY)
         progress(0.1, desc=f"Found uploads playlist: {playlist_id}")
 
-        # 3. Fetch Video Details (Synchronous Pagination)
-        progress(0.1, desc=f"Fetching video list (up to {max_videos})...")
-        all_video_details = [] # Stores (id, date_str, title)
-        next_page_token = None
-        fetch_attempt = 0
-        max_fetch_attempts = 3
-
-        while True:
-            try:
-                print(f"Fetching page... (token: {next_page_token})")
-                # Returns (List[Tuple[str, str, str]], Optional[str])
-                video_details_page, next_page_token = _fetch_video_ids_page_sync(
-                    playlist_id, YT_API_KEY, next_page_token
-                )
-                print(f"Fetched {len(video_details_page)} video details this page.")
-                all_video_details.extend(video_details_page)
-
-                if len(all_video_details) >= int(max_videos):
-                    print(f"Reached max_videos limit ({max_videos}).")
-                    break
-                if not next_page_token:
-                    print("No more pages.")
-                    break
-                fetch_attempt = 0 # Reset attempts on success
-            except YouTubeChannelError as e:
-                fetch_attempt += 1
-                print(f"Error fetching video details page: {e}. Attempt {fetch_attempt}/{max_fetch_attempts}", file=sys.stderr)
-                if fetch_attempt >= max_fetch_attempts:
-                    raise YouTubeChannelError(f"Failed to fetch video details after {max_fetch_attempts} attempts.") from e
-                time.sleep(RETRY_WAIT_SECONDS)
-            except Exception as e:
-                 print(f"Unexpected error during video details fetch pagination: {e}", file=sys.stderr)
-                 raise # Reraise unexpected errors immediately
-
-        # Truncate
-        all_video_details = all_video_details[:int(max_videos)]
+        # 3. Fetch Video Details using the new helper
+        all_video_details = fetch_all_video_details(playlist_id, YT_API_KEY, int(max_videos))
         progress(0.2, desc=f"Found {len(all_video_details)} video details.")
         if not all_video_details: return "ℹ️ No videos found for this channel in the specified timeframe or limit."
 
         # 4. Filter Videos by Date
         progress(0.2, desc="Filtering videos by date...")
-        filtered_videos = [] # Stores (id, date_str, title)
+        filtered_videos = []
         warnings = []
-        for video_id, pub_date_str, title in all_video_details: # Unpack title
+        for video_id, pub_date_str, title in all_video_details:
             try:
                 pub_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
                 if start_date <= pub_date <= end_date:
-                    filtered_videos.append((video_id, pub_date_str, title)) # Append tuple with title
+                    filtered_videos.append((video_id, pub_date_str, title))
             except ValueError:
                 warnings.append(f"⚠️ Warning: Could not parse publish date '{pub_date_str}' for video {video_id}. Skipping.")
             except Exception as e:
@@ -397,73 +452,29 @@ def process_channel_search(
         progress(0.3, desc=f"Filtered down to {total_videos_to_process} videos. Processing sequentially...")
         print(f"Processing {total_videos_to_process} videos sequentially after date filtering.")
 
-        # 5. Fetch Transcripts and Search Sequentially
+        # 5. Process Filtered Videos
         processed_count = 0
-        for video_id, pub_date_str, title in filtered_videos: # Unpack title
+        found_matches_overall = False
+        for video_id, pub_date_str, title in filtered_videos:
             processed_count += 1
             progress(0.3 + (0.6 * processed_count / total_videos_to_process),
-                     desc=f"Processing video {processed_count}/{total_videos_to_process} ('{title[:30]}...')...") # Show title in progress
-            try:
-                print(f"[{video_id}] Processing '{title}'... Check cache.")
-                # Check cache synchronously
-                if video_id in _transcript_cache:
-                     print(f"Cache hit for transcript: {video_id}")
-                     transcript = _transcript_cache[video_id]
-                else:
-                    print(f"Cache miss. Fetching transcript sync for: {video_id}")
-                    # Call the sync helper directly
-                    # Add manual retry logic for sync transcript fetch
-                    transcript_fetch_attempt = 0
-                    transcript = None
-                    last_transcript_error = None
-                    while transcript_fetch_attempt < RETRY_ATTEMPTS:
-                        try:
-                            transcript = _fetch_transcript_sync(video_id) # NO await/to_thread
-                            break # Success
-                        except TranscriptFetchError as e:
-                            transcript_fetch_attempt += 1
-                            last_transcript_error = e
-                            print(f"Transcript fetch error attempt {transcript_fetch_attempt}/{RETRY_ATTEMPTS} for {video_id}: {e}", file=sys.stderr)
-                            if transcript_fetch_attempt < RETRY_ATTEMPTS:
-                                time.sleep(RETRY_WAIT_SECONDS)
-                        except Exception as e: # Catch other potential errors
-                            last_transcript_error = e
-                            print(f"Unexpected transcript fetch error for {video_id}: {e}", file=sys.stderr)
-                            break # Don't retry unexpected errors
-                    
-                    if transcript is None:
-                        raise last_transcript_error or TranscriptFetchError(f"Failed to fetch transcript for {video_id} after retries.")
-
-                    _transcript_cache[video_id] = transcript # Cache result
-                    print(f"Successfully fetched and cached transcript for: {video_id} ('{title}')")
-
-                print(f"[{video_id}] Transcript obtained for '{title}'. Searching for '{keyword}'...")
-                matches = search_in_transcript(transcript, keyword)
-                print(f"[{video_id}] Search complete for '{title}'. Found {len(matches)} matches.")
-
-                if matches:
-                    found_matches = True
-                    # Use title in the results header
-                    results.append(f"### ✅ Found Matches in Video: [{title}](https://www.youtube.com/watch?v={video_id}) (Published: {pub_date_str.split('T')[0]}):\n")
-                    for segment in matches:
-                         start_time = segment.get('start', 0)
-                         minutes = int(start_time // 60)
-                         seconds = int(start_time % 60)
-                         # Use video_id for the timestamp link
-                         results.append(f"- [{minutes:02d}:{seconds:02d}](https://www.youtube.com/watch?v={video_id}&t={int(start_time)}s): {segment['text']}\n")
-                    results.append("\n---\n")
-
-            except Exception as e:
-                # Include title in error message
-                print(f"[{video_id}] Error processing '{title}': {e}", file=sys.stderr)
-                results.append(f"⚠️ Skipping video [{title}](https://www.youtube.com/watch?v={video_id}): `{e}`\n")
-
+                     desc=f"Processing video {processed_count}/{total_videos_to_process} ('{title[:30]}...')...")
+            
+            # Call the helper to process this video
+            single_video_results = _process_single_video(video_id, title, pub_date_str, keyword)
+            
+            # Add the results (or warning) from the helper to the main results list
+            results.extend(single_video_results)
+            
+            # Check if the results were actual matches (not just warnings)
+            if single_video_results and not single_video_results[0].startswith("⚠️"): 
+                found_matches_overall = True
+            
         # 6. Finalize
-        if not found_matches:
-            results.append("\n**ℹ️ No matches found for the keyword in the specified videos and date range.**")
+        if not found_matches_overall:
+            results.append("\n**ℹ️ No matches found for the keyword...**")
         progress(1.0, desc="Search complete!")
 
-    # Outer exception handling remains largely the same
     except ValueError as e:
         return f"❌ Configuration Error: {e}"
     except YouTubeChannelError as e:
@@ -473,7 +484,6 @@ def process_channel_search(
         traceback.print_exc()
         return f"❌ An unexpected error occurred: {e}"
 
-    # Join and return results (remains the same)
     return "\n".join(results)
 
 # --- Gradio Interface ---
@@ -499,34 +509,36 @@ def create_gradio_interface():
                 )
                 keyword_input = gr.Textbox(label="Keyword", placeholder="e.g., Gradio, AI, TensorFlow")
             with gr.Column(scale=1):
-                # Default dates (e.g., last year)
-                today = date.today()
-                one_year_ago = date(today.year - 1, today.month, today.day)
-                # Format dates as YYYY-MM-DD strings
-                today_str = today.strftime("%Y-%m-%d")
-                one_year_ago_str = one_year_ago.strftime("%Y-%m-%d")
-                
-                # Use standard Textbox with pattern instructions instead of Date component
-                start_date_input = gr.Textbox(
-                    label="Start Date",
-                    value=one_year_ago_str,
-                    placeholder="YYYY-MM-DD",
-                    info="Enter date in YYYY-MM-DD format (e.g., 2023-01-31)"
-                )
-                end_date_input = gr.Textbox(
-                    label="End Date",
-                    value=today_str,
-                    placeholder="YYYY-MM-DD",
-                    info="Enter date in YYYY-MM-DD format (e.g., 2024-05-15)"
-                )
-                max_videos_input = gr.Slider(
-                    minimum=10,
-                    maximum=500, # Adjust max as needed, consider API quota
-                    value=50,
-                    step=10,
-                    label="Max Videos to Check",
-                    info="Maximum number of *latest* videos to fetch before date filtering.",
-                )
+                # Use gr.Accordion for Advanced Options
+                with gr.Accordion("Advanced Options", open=False): # Accordion closed by default
+                    # Default dates (e.g., last year)
+                    today = date.today()
+                    one_month_ago = date(today.year, today.month - 1, today.day)
+                    # Format dates as YYYY-MM-DD strings
+                    today_str = today.strftime("%Y-%m-%d")
+                    one_month_ago_str = one_month_ago.strftime("%Y-%m-%d")
+                    
+                    # Use standard Textbox with pattern instructions instead of Date component
+                    start_date_input = gr.DateTime(
+                        label="Start Date",
+                        value=one_month_ago_str,
+                        include_time=False,
+                        type="string"
+                    )
+                    end_date_input = gr.DateTime(
+                        label="End Date",
+                        value=today_str,
+                        include_time=False,
+                        type="string"
+                    )
+                    max_videos_input = gr.Slider(
+                        minimum=10,
+                        maximum=50, # Adjust max as needed, consider API quota
+                        value=10,
+                        step=5,
+                        label="Max Videos to Check",
+                        info="Maximum number of *latest* videos to fetch before date filtering.",
+                    )
 
         submit_button = gr.Button("Search Channel Transcripts", variant="primary")
         output_markdown = gr.Markdown(label="Results")
