@@ -1,7 +1,6 @@
-gradio>=4.0.0
+streamlit>=1.0.0
 google-api-python-client
 youtube-transcript-api
 python-dotenv
 groq
-uvicorn[standard]
-# Consider pinning versions for stable deployments, e.g., gradio==4.20.0
+# Consider pinning versions for stable deployments, e.g., streamlit==1.30.0
