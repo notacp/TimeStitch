@@ -6,7 +6,7 @@ import time # Added for sleep in retries
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 # from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type # Removed tenacity
-from typing import List, Tuple, Optional, Dict, Any, Union # Removed AsyncGenerator
+from typing import List, Tuple, Optional, Dict, Any, Union, Generator # Added Generator
 from datetime import datetime, date, timezone
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import gradio as gr
@@ -370,7 +370,10 @@ def _process_single_video(video_id: str, title: str, pub_date_str: str, keyword:
                  start_time = segment.get('start', 0)
                  minutes = int(start_time // 60)
                  seconds = int(start_time % 60)
-                 video_results.append(f"- [{minutes:02d}:{seconds:02d}](https://www.youtube.com/watch?v={video_id}&t={int(start_time)}s): {segment['text']}\n")
+                 # Bold the keyword in the segment text using case-insensitive regex substitution
+                 pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                 highlighted_text = pattern.sub(r'**\g<0>**', segment['text'])
+                 video_results.append(f"- [{minutes:02d}:{seconds:02d}](https://www.youtube.com/watch?v={video_id}&t={int(start_time)}s): {highlighted_text}\n")
             video_results.append("\n---\n")
         
         return video_results # Return formatted results list for this video
@@ -385,22 +388,25 @@ def process_channel_search(
     start_date_input: str,
     end_date_input: str,
     keyword: str,
-    max_videos: int,
-    progress: gr.Progress = gr.Progress(track_tqdm=True)
-) -> str:
+    max_videos: int
+) -> Generator[str, None, None]: # Updated return type
     """
     Process channel search synchronously.
-    Returns results as a formatted Markdown string.
+    Yields status updates and returns results as a formatted Markdown string.
     """
-    progress(0, desc="Starting search...")
+    # Yield initial status
+    yield "⏳ Searching... Please wait."
+
     found_matches = False
     results = []
 
     # 1. Validate Inputs (remains the same)
     if not keyword:
-        return "❌ Error: Please provide a keyword to search for."
+        yield "❌ Error: Please provide a keyword to search for."
+        return
     if not channel_url_or_id:
-        return "❌ Error: Please provide a Channel URL or ID."
+        yield "❌ Error: Please provide a Channel URL or ID."
+        return
 
     start_date = parse_date(start_date_input)
     end_date = parse_date(end_date_input)
@@ -411,28 +417,30 @@ def process_channel_search(
 
 
     if not start_date or not end_date:
-        return f"❌ Error: Invalid date format. Please use YYYY-MM-DD format. Start: {start_date_input}, End: {end_date_input}"
+        yield f"❌ Error: Invalid date format. Please use YYYY-MM-DD format. Start: {start_date_input}, End: {end_date_input}"
+        return
     if start_date > end_date:
-        return f"❌ Error: Start Date ({start_date.date()}) must be before or the same as End Date ({end_date.date()})."
+        yield f"❌ Error: Start Date ({start_date.date()}) must be before or the same as End Date ({end_date.date()})."
+        return
     print(f"Date Range: {start_date.isoformat()} to {end_date.isoformat()}")
 
 
     try:
         # 2. Get Playlist ID
-        progress(0.05, desc="Fetching channel info...")
         channel_id = _extract_channel_id(channel_url_or_id, YT_API_KEY)
-        if not channel_id: return f"❌ Error: Could not extract or resolve a valid YouTube Channel ID from the input: '{channel_url_or_id}'. Please check the URL or ID."
+        if not channel_id:
+            yield f"❌ Error: Could not extract or resolve a valid YouTube Channel ID from the input: '{channel_url_or_id}'. Please check the URL or ID."
+            return
         if not YT_API_KEY: raise ValueError("YT_API_KEY is not set in environment variables.")
         playlist_id = fetch_playlist_id(channel_id, YT_API_KEY)
-        progress(0.1, desc=f"Found uploads playlist: {playlist_id}")
 
         # 3. Fetch Video Details using the new helper
         all_video_details = fetch_all_video_details(playlist_id, YT_API_KEY, int(max_videos))
-        progress(0.2, desc=f"Found {len(all_video_details)} video details.")
-        if not all_video_details: return "ℹ️ No videos found for this channel in the specified timeframe or limit."
+        if not all_video_details:
+            yield "ℹ️ No videos found for this channel in the specified timeframe or limit."
+            return
 
         # 4. Filter Videos by Date
-        progress(0.2, desc="Filtering videos by date...")
         filtered_videos = []
         warnings = []
         for video_id, pub_date_str, title in all_video_details:
@@ -446,10 +454,11 @@ def process_channel_search(
                 warnings.append(f"⚠️ Warning: Error processing date for video {video_id}: {e}. Skipping.")
 
         results.extend(warnings)
-        if not filtered_videos: return f"ℹ️ No videos found within the date range: {start_date.date()} to {end_date.date()}."
+        if not filtered_videos:
+            yield f"ℹ️ No videos found within the date range: {start_date.date()} to {end_date.date()}."
+            return
 
         total_videos_to_process = len(filtered_videos)
-        progress(0.3, desc=f"Filtered down to {total_videos_to_process} videos. Processing sequentially...")
         print(f"Processing {total_videos_to_process} videos sequentially after date filtering.")
 
         # 5. Process Filtered Videos
@@ -457,8 +466,6 @@ def process_channel_search(
         found_matches_overall = False
         for video_id, pub_date_str, title in filtered_videos:
             processed_count += 1
-            progress(0.3 + (0.6 * processed_count / total_videos_to_process),
-                     desc=f"Processing video {processed_count}/{total_videos_to_process} ('{title[:30]}...')...")
             
             # Call the helper to process this video
             single_video_results = _process_single_video(video_id, title, pub_date_str, keyword)
@@ -473,18 +480,22 @@ def process_channel_search(
         # 6. Finalize
         if not found_matches_overall:
             results.append("\n**ℹ️ No matches found for the keyword...**")
-        progress(1.0, desc="Search complete!")
 
     except ValueError as e:
-        return f"❌ Configuration Error: {e}"
+        yield f"❌ Configuration Error: {e}"
+        return
     except YouTubeChannelError as e:
-        return f"❌ YouTube API Error: {e}"
+        yield f"❌ YouTube API Error: {e}"
+        return
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"❌ An unexpected error occurred: {e}"
+        yield f"❌ An unexpected error occurred: {e}"
+        return
 
-    return "\n".join(results)
+    # Yield final result
+    yield "\n".join(results)
+    return
 
 # --- Gradio Interface ---
 
@@ -493,7 +504,7 @@ def create_gradio_interface():
     with gr.Blocks(theme=gr.themes.Soft()) as iface:
         gr.Markdown(
             """
-            # YouTube Channel Transcript Searcher 🔎
+            # TimeSnitch 🕒📺
             Enter a YouTube Channel URL, date range, keyword, and max videos to search.
             The app will fetch video transcripts within the date range and find segments containing the keyword.
             Results are streamed as they are found.
@@ -559,24 +570,26 @@ def create_gradio_interface():
 
     return iface
 
-# --- Main Execution ---
+# --- Main Execution / Vercel Entry Point ---
 
-if __name__ == "__main__":
-    if not YT_API_KEY:
-         print("--------------------------------------------------------------------------", file=sys.stderr)
-         print("ERROR: YT_API_KEY not found in environment variables or .env file.", file=sys.stderr)
-         print("The application requires a YouTube Data API Key to function.", file=sys.stderr)
-         print("Please create a .env file with YT_API_KEY=<your_key> or set the environment variable.", file=sys.stderr)
-         print("You can obtain an API key from the Google Cloud Console:", file=sys.stderr)
-         print("https://developers.google.com/youtube/v3/getting-started", file=sys.stderr)
-         print("--------------------------------------------------------------------------", file=sys.stderr)
-         # Optionally, exit or show an error in Gradio itself
-         # sys.exit(1)
+# Create the interface and assign it to 'app' for Vercel
+app = create_gradio_interface()
 
-    # Create and launch the interface
-    app_iface = create_gradio_interface()
-
-    # Launch the server - no need for queue() with non-streaming version
-    # Set share=True to create a public link (useful for HF Spaces)
-    # Set debug=True for more detailed logs during development
-    app_iface.launch(debug=False) # Set debug=True locally if needed 
+# The following block is for local execution only and should be removed or commented out for Vercel deployment.
+# Vercel's runtime will directly use the 'app' object above with an ASGI server.
+# if __name__ == "__main__":
+#     if not YT_API_KEY:
+#          print("--------------------------------------------------------------------------", file=sys.stderr)
+#          print("ERROR: YT_API_KEY not found in environment variables or .env file.", file=sys.stderr)
+#          print("The application requires a YouTube Data API Key to function.", file=sys.stderr)
+#          print("Please create a .env file with YT_API_KEY=<your_key> or set the environment variable.", file=sys.stderr)
+#          print("You can obtain an API key from the Google Cloud Console:", file=sys.stderr)
+#          print("https://developers.google.com/youtube/v3/getting-started", file=sys.stderr)
+#          print("--------------------------------------------------------------------------", file=sys.stderr)
+#          # Optionally, exit or show an error in Gradio itself
+#          # sys.exit(1)
+#
+#     # Launch the server - no need for queue() with non-streaming version
+#     # Set share=True to create a public link (useful for HF Spaces)
+#     # Set debug=True for more detailed logs during development
+#     app.launch(debug=False) # Set debug=True locally if needed 
