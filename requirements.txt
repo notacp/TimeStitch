@@ -1,9 +1,7 @@
 gradio>=4.0.0
 google-api-python-client
-google-auth-oauthlib
-google-auth-httplib2
 youtube-transcript-api
-httpx
-tenacity
 python-dotenv
 groq
+uvicorn[standard]
+# Consider pinning versions for stable deployments, e.g., gradio==4.20.0
