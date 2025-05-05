@@ -570,24 +570,26 @@ def create_gradio_interface():
 
     return iface
 
-# --- Main Execution ---
+# --- Main Execution / Vercel Entry Point ---
 
-if __name__ == "__main__":
-    if not YT_API_KEY:
-         print("--------------------------------------------------------------------------", file=sys.stderr)
-         print("ERROR: YT_API_KEY not found in environment variables or .env file.", file=sys.stderr)
-         print("The application requires a YouTube Data API Key to function.", file=sys.stderr)
-         print("Please create a .env file with YT_API_KEY=<your_key> or set the environment variable.", file=sys.stderr)
-         print("You can obtain an API key from the Google Cloud Console:", file=sys.stderr)
-         print("https://developers.google.com/youtube/v3/getting-started", file=sys.stderr)
-         print("--------------------------------------------------------------------------", file=sys.stderr)
-         # Optionally, exit or show an error in Gradio itself
-         # sys.exit(1)
+# Create the interface and assign it to 'app' for Vercel
+app = create_gradio_interface()
 
-    # Create and launch the interface
-    app_iface = create_gradio_interface()
-
-    # Launch the server - no need for queue() with non-streaming version
-    # Set share=True to create a public link (useful for HF Spaces)
-    # Set debug=True for more detailed logs during development
-    app_iface.launch(debug=False) # Set debug=True locally if needed 
+# The following block is for local execution only and should be removed or commented out for Vercel deployment.
+# Vercel's runtime will directly use the 'app' object above with an ASGI server.
+# if __name__ == "__main__":
+#     if not YT_API_KEY:
+#          print("--------------------------------------------------------------------------", file=sys.stderr)
+#          print("ERROR: YT_API_KEY not found in environment variables or .env file.", file=sys.stderr)
+#          print("The application requires a YouTube Data API Key to function.", file=sys.stderr)
+#          print("Please create a .env file with YT_API_KEY=<your_key> or set the environment variable.", file=sys.stderr)
+#          print("You can obtain an API key from the Google Cloud Console:", file=sys.stderr)
+#          print("https://developers.google.com/youtube/v3/getting-started", file=sys.stderr)
+#          print("--------------------------------------------------------------------------", file=sys.stderr)
+#          # Optionally, exit or show an error in Gradio itself
+#          # sys.exit(1)
+#
+#     # Launch the server - no need for queue() with non-streaming version
+#     # Set share=True to create a public link (useful for HF Spaces)
+#     # Set debug=True for more detailed logs during development
+#     app.launch(debug=False) # Set debug=True locally if needed 
