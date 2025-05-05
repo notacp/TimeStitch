@@ -530,15 +530,15 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        start_date_input = st.date_input("🗓️ Start Date (Optional)", value=None, format="YYYY-MM-DD")
+        start_date_input = st.date_input("🗓️ Start Date (Optional)", value=None, format="DD-MM-YYYY")
     with col2:
-        end_date_input = st.date_input("🗓️ End Date (Optional)", value=None, format="YYYY-MM-DD")
+        end_date_input = st.date_input("🗓️ End Date (Optional)", value=None, format="DD-MM-YYYY")
 
     max_videos_input = st.number_input(
         "🔢 Max Videos to Scan",
         min_value=1,
-        value=100,
-        step=50,
+        value=10,
+        step=5,
         help="Maximum number of most recent videos to analyze."
     )
 
