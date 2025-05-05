@@ -94,7 +94,7 @@ PRs welcome! If you have ideas for performance boosts, UI upgrades, or multi-cha
 
 ## 📬 Contact
 
-Built by [Pradyumn Khanchandani](https://www.linkedin.com/in/pradyumn-khanchandani/))  
+Built by [Pradyumn Khanchandani](https://www.linkedin.com/in/pradyumn-khanchandani/)
 
 ---
 
