@@ -27,8 +27,8 @@ class YouTubeService:
         if match:
             return match.group(1)
 
-        # 3. Handle URL (/@handle)
-        match = re.search(r"youtube\.com/@([a-zA-Z0-9_.-]+)", channel_url_or_id)
+        # 3. Handle URL or just @handle
+        match = re.search(r"(?:youtube\.com/)?@([a-zA-Z0-9_.-]+)", channel_url_or_id)
         if match:
             return self._resolve_name_to_channel_id(match.group(1))
 
@@ -37,7 +37,8 @@ class YouTubeService:
         if match:
             return self._resolve_name_to_channel_id(match.group(1))
 
-        return None
+        # 5. Fallback: treat as a plain name/search query
+        return self._resolve_name_to_channel_id(channel_url_or_id)
 
     def _resolve_name_to_channel_id(self, name_or_handle: str) -> Optional[str]:
         try:
@@ -95,10 +96,29 @@ class YouTubeService:
 
     def get_transcript(self, video_id: str) -> List[Dict[str, Any]]:
         try:
-            return YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US'])
-        except (TranscriptsDisabled, NoTranscriptFound):
+            # Replaced static call with instance-based call as per library help
+            api = YouTubeTranscriptApi()
+            transcript_list = api.list(video_id)
+            # Find an English transcript or fallback to the first available
+            try:
+                transcript = transcript_list.find_transcript(['en', 'en-US'])
+            except NoTranscriptFound:
+                # If no English, just take the first one available
+                transcript = next(iter(transcript_list))
+            
+            # fetch the actual transcript data
+            raw_data = transcript.fetch()
+            # Convert objects to dictionaries if they aren't already
+            return [
+                {'text': s.text, 'start': s.start, 'duration': s.duration} 
+                if not isinstance(s, dict) else s 
+                for s in raw_data
+            ]
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            print(f"DEBUG: Transcript API error for {video_id}: {type(e).__name__}")
             return []
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: Unexpected error fetching transcript for {video_id}: {str(e)}")
             return []
 
     def search_in_transcript(self, transcript: List[Dict[str, Any]], keyword: str) -> List[Dict[str, Any]]:

@@ -33,13 +33,17 @@ async def search(
     try:
         playlist_id = service.fetch_uploads_playlist_id(channel_id)
         videos = service.fetch_videos(playlist_id, max_videos=max_videos)
+        print(f"DEBUG: Found {len(videos)} videos in playlist {playlist_id}")
         
         results = []
         for video in videos:
+            print(f"DEBUG: Fetching transcript for video: {video['id']} ({video['title']})")
             transcript = service.get_transcript(video["id"])
             if transcript:
+                print(f"DEBUG: Transcript found for {video['id']}. Searching for '{keyword}'...")
                 matches = service.search_in_transcript(transcript, keyword)
                 if matches:
+                    print(f"DEBUG: FOUND {len(matches)} matches in {video['id']}")
                     results.append(SearchResult(
                         video_id=video["id"],
                         title=video["title"],
@@ -47,8 +51,15 @@ async def search(
                         thumbnail=video["thumbnail"],
                         matches=matches
                     ))
+                else:
+                    print(f"DEBUG: No matches found in {video['id']}")
+            else:
+                print(f"DEBUG: No transcript found for {video['id']}")
+        
+        print(f"DEBUG: Returning {len(results)} total video results")
         return results
     except Exception as e:
+        print(f"DEBUG: ERROR in search: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/resolve-channel")
