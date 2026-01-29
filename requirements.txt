@@ -1,6 +1,12 @@
-streamlit>=1.0.0
-google-api-python-client
-youtube-transcript-api
-python-dotenv
-groq
-# Consider pinning versions for stable deployments, e.g., streamlit==1.30.0
+# FastAPI
+fastapi==0.109.2
+uvicorn==0.27.1
+python-dotenv==1.0.1
+pydantic==2.6.1
+
+# YouTube
+google-api-python-client==2.118.0
+youtube-transcript-api==0.6.2
+
+# Vercel
+# (Vercel installs these automatically or via this file)
