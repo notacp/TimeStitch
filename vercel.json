@@ -5,6 +5,6 @@
             "destination": "/api"
         }
     ],
-    "buildCommand": "cd frontend && npm install && npm run build",
-    "outputDirectory": "frontend/.next"
+    "buildCommand": "npm install && npm run build",
+    "outputDirectory": ".next"
 }
