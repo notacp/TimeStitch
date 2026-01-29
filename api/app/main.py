@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import search
+from .routers import search
 from dotenv import load_dotenv
 import os
 

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
-from app.services.youtube import YouTubeService
+from ..services.youtube import YouTubeService
 from typing import List, Optional
 import os
 from pydantic import BaseModel
