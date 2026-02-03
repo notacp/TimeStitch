@@ -4,7 +4,11 @@ from .routers import search
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+from pathlib import Path
+
+# Load .env from the root directory (3 levels up from this file)
+env_path = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
 
 app = FastAPI(title="TimeStitch API")
 

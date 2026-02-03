@@ -1,7 +1,6 @@
 import os
 import re
-import time
-from typing import List, Tuple, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -42,6 +41,7 @@ class YouTubeService:
 
     def _resolve_name_to_channel_id(self, name_or_handle: str) -> Optional[str]:
         try:
+            print(f"DEBUG: Resolving '{name_or_handle}' to Channel ID via search...")
             search_response = self.youtube.search().list(
                 part="snippet",
                 q=name_or_handle,
@@ -50,9 +50,13 @@ class YouTubeService:
             ).execute()
 
             if search_response.get("items"):
-                return search_response["items"][0]["snippet"]["channelId"]
+                channel_id = search_response["items"][0]["snippet"]["channelId"]
+                print(f"DEBUG: Resolved to {channel_id}")
+                return channel_id
+            print(f"DEBUG: No channel found for '{name_or_handle}'")
             return None
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: Error resolving channel name: {str(e)}")
             return None
 
     def fetch_uploads_playlist_id(self, channel_id: str) -> str:
@@ -95,25 +99,13 @@ class YouTubeService:
         return videos
 
     def get_transcript(self, video_id: str) -> List[Dict[str, Any]]:
+        """Fetch transcript using the 1.2.x API (instance methods with innertube)."""
         try:
-            # Replaced static call with instance-based call as per library help
-            api = YouTubeTranscriptApi()
-            transcript_list = api.list(video_id)
-            # Find an English transcript or fallback to the first available
-            try:
-                transcript = transcript_list.find_transcript(['en', 'en-US'])
-            except NoTranscriptFound:
-                # If no English, just take the first one available
-                transcript = next(iter(transcript_list))
-            
-            # fetch the actual transcript data
-            raw_data = transcript.fetch()
-            # Convert objects to dictionaries if they aren't already
-            return [
-                {'text': s.text, 'start': s.start, 'duration': s.duration} 
-                if not isinstance(s, dict) else s 
-                for s in raw_data
-            ]
+            # 1.2.x API: create instance and use fetch() with innertube backend
+            ytt_api = YouTubeTranscriptApi()
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US'])
+            # Convert to raw dictionary format
+            return transcript.to_raw_data()
         except (TranscriptsDisabled, NoTranscriptFound) as e:
             print(f"DEBUG: Transcript API error for {video_id}: {type(e).__name__}")
             return []

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from ..services.youtube import YouTubeService
 from typing import List, Optional
+from datetime import datetime
 import os
 from pydantic import BaseModel
 
@@ -23,7 +24,8 @@ class SearchResult(BaseModel):
 async def search(
     channel_url: str,
     keyword: str,
-    max_videos: int = 10,
+    max_videos: int = 20,
+    published_after: Optional[str] = None,
     service: YouTubeService = Depends(get_yt_service)
 ):
     channel_id = service.resolve_channel_id(channel_url)
@@ -32,12 +34,26 @@ async def search(
 
     try:
         playlist_id = service.fetch_uploads_playlist_id(channel_id)
-        videos = service.fetch_videos(playlist_id, max_videos=max_videos)
-        print(f"DEBUG: Found {len(videos)} videos in playlist {playlist_id}")
+        # Fetch more videos initially to account for date filtering
+        fetch_count = max_videos * 3 if published_after else max_videos
+        videos = service.fetch_videos(playlist_id, max_videos=fetch_count)
+
+        # Filter by published_after date if provided
+        if published_after:
+            try:
+                cutoff_date = datetime.fromisoformat(published_after.replace('Z', '+00:00'))
+                videos = [
+                    v for v in videos
+                    if datetime.fromisoformat(v['publishedAt'].replace('Z', '+00:00')) >= cutoff_date
+                ][:max_videos]  # Limit after filtering
+            except ValueError as e:
+                print(f"DEBUG: Invalid date format: {published_after}, error: {e}")
+
+        print(f"DEBUG: Found {len(videos)} videos in playlist {playlist_id} (after date filter)")
         
         results = []
         for video in videos:
-            print(f"DEBUG: Fetching transcript for video: {video['id']} ({video['title']})")
+            print(f"DEBUG: Analyzing Video {video['id']}: '{video['title']}'...")
             transcript = service.get_transcript(video["id"])
             if transcript:
                 print(f"DEBUG: Transcript found for {video['id']}. Searching for '{keyword}'...")

@@ -6,7 +6,7 @@ pydantic==2.6.1
 
 # YouTube
 google-api-python-client==2.118.0
-youtube-transcript-api==0.6.2
+youtube-transcript-api==1.2.4
 
 # Vercel
 # (Vercel installs these automatically or via this file)
