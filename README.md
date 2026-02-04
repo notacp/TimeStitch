@@ -1,101 +1,123 @@
+# TimeStitch
 
-### ⏱️ TimeStitch - Ctrl+F for Youtube
-**Search inside YouTube videos — sentence by sentence.**
+**Ctrl+F for YouTube** — Search inside video transcripts with clickable timestamps.
 
-TimeStitch is a powerful tool that lets you search across any YouTube channel for specific **keywords or phrases**, and returns a list of videos with **clickable timestamps** where those words were spoken.
+TimeStitch lets you search across any YouTube channel for specific keywords or phrases and returns videos with clickable timestamps where those words were spoken.
 
-No more scrubbing through endless content.  
-No more guessing.  
-Just fast, precise, deep video search.
+## Features
 
----
+- **Channel-Wide Search**: Search across all public videos from any YouTube channel
+- **Keyword Matching**: Locate where any keyword or phrase is actually said
+- **Clickable Timestamps**: Jump directly to the moment in the video
+- **Time Range Filtering**: Filter by last 7 days, 30 days, 6 months, 1 year, or all time
+- **Video Preview**: Embedded player with timestamp synchronization
+- **Context Display**: See surrounding text for each match
 
-## 🔍 Features
+## Tech Stack
 
-- 🎯 **Channel-Wide Search**: Search across all public videos from any YouTube channel.  
-- 🕵️‍♂️ **Keyword Matching**: Input any keyword or phrase to locate where it's actually said.  
-- ⏱️ **Clickable Timestamps**: Jump directly to the moment it’s mentioned in the video.  
-- 📜 **Transcript Parsing**: Uses YouTube's auto-generated transcripts for accurate search.  
-- ⚡ **Fast & Lightweight**: Built with performance and simplicity in mind.
+**Frontend**
+- Next.js 16 with App Router
+- React 19, TypeScript
+- Tailwind CSS, Framer Motion
 
----
+**Backend**
+- FastAPI (Python)
+- YouTube Data API v3
+- youtube-transcript-api
 
-## 🚀 How It Works
+**Deployment**
+- Vercel (serverless functions)
 
-1. Paste a **YouTube channel URL**  
-2. Enter a **keyword or phrase**  
-3. TimeStitch crawls video transcripts and returns a list of:
-   - Video titles
-   - Timestamps where the phrase appears
-   - Direct links to each timestamp
+## Project Structure
 
----
+```
+TimeStitch/
+├── src/
+│   ├── app/           # Next.js pages and layout
+│   ├── components/    # React components
+│   ├── lib/           # Utilities
+│   └── types/         # TypeScript interfaces
+├── api/
+│   ├── app/
+│   │   ├── main.py    # FastAPI app
+│   │   ├── routers/   # API endpoints
+│   │   └── services/  # YouTube service
+│   └── index.py       # Vercel entry point
+├── next.config.ts
+├── vercel.json
+└── requirements.txt
+```
 
-## 🧑‍💻 Tech Stack
+## Setup
 
-- Python  
-- YouTube Data API  
-- `youtube-transcript-api`  
-- FastAPI (or Flask, depending on implementation)  
-- Streamlit / Gradio (for UI, optional)  
+### Prerequisites
 
----
+- Python 3.8+
+- Node.js 18+
+- YouTube Data API key ([Google Cloud Console](https://console.cloud.google.com/))
 
-## 📦 Installation
+### Installation
 
 ```bash
+# Clone repository
 git clone https://github.com/yourusername/timestitch.git
 cd timestitch
+
+# Backend setup
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+# Frontend setup
+npm install
 ```
 
-Make sure to set up your environment variables:
+### Environment Variables
+
+Create a `.env` file in the root directory:
+
+```env
+YT_API_KEY=your_youtube_api_key
+```
+
+### Running Locally
 
 ```bash
-export YOUTUBE_API_KEY=your_youtube_data_api_key
+# Terminal 1: Start backend
+uvicorn api.app.main:app --reload --port 8000
+
+# Terminal 2: Start frontend
+npm run dev
 ```
 
----
+Open [http://localhost:3000](http://localhost:3000)
 
-## 🧪 Usage
+## Deployment
 
-```bash
-python app.py
-```
+Configured for Vercel:
 
-Or if you're using Streamlit/Gradio:
+1. Push to GitHub
+2. Connect repository to Vercel
+3. Add `YT_API_KEY` in Vercel environment variables
+4. Deploy
 
-```bash
-streamlit run app.py
-```
+## API Endpoints
 
-Then access it on `localhost:8501` (or wherever deployed).
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/search` | GET | Search transcripts for keyword |
+| `/api/resolve-channel` | GET | Resolve channel URL to ID |
 
----
+**Search Parameters:**
+- `channel_url` - YouTube channel URL or handle
+- `keyword` - Search term
+- `max_videos` - Limit (default: 20)
+- `published_after` - ISO date filter (optional)
 
-## 📌 Example
+## License
 
-**Input:**  
-- Channel: `https://www.youtube.com/@lexfridman`  
-- Keyword: `AI ethics`
-
-**Output:**  
-- `Video: "AI and the Future"`  
-  - `⏱️ 13:42 - Discussion on ethical alignment`  
-  - `⏱️ 27:10 - Debating bias in AI systems`
-
----
-
-## 🙌 Contribute
-
-PRs welcome! If you have ideas for performance boosts, UI upgrades, or multi-channel search — let’s build it together.
+MIT
 
 ---
-
-## 📬 Contact
 
 Built by [Pradyumn Khanchandani](https://www.linkedin.com/in/pradyumn-khanchandani/)
-
----
-
-**TimeStitch** — Ctrl+F for YouTube.
