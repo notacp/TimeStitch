@@ -1,6 +1,10 @@
 {
     "builds": [
         {
+            "src": "package.json",
+            "use": "@vercel/next"
+        },
+        {
             "src": "api/index.py",
             "use": "@vercel/python"
         }
@@ -10,7 +14,5 @@
             "source": "/api/:path*",
             "destination": "/api/index.py"
         }
-    ],
-    "buildCommand": "npm install && npm run build",
-    "outputDirectory": ".next"
+    ]
 }
