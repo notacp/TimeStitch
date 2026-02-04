@@ -1,8 +1,14 @@
 {
+    "builds": [
+        {
+            "src": "api/index.py",
+            "use": "@vercel/python"
+        }
+    ],
     "rewrites": [
         {
             "source": "/api/:path*",
-            "destination": "/api/:path*"
+            "destination": "/api/index.py"
         }
     ],
     "buildCommand": "npm install && npm run build",
