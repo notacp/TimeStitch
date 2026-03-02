@@ -78,6 +78,10 @@ Create a `.env` file in the root directory:
 
 ```env
 YT_API_KEY=your_youtube_api_key
+
+# Optional: Add a residential proxy URL if deploying to Vercel
+# to prevent YouTube from blocking the server IP.
+PROXY_URL=http://user:pass@proxy-server:port
 ```
 
 ### Running Locally

@@ -20,13 +20,19 @@ class SearchResult(BaseModel):
     thumbnail: str
     matches: List[dict]
 
+import tempfile
+
 # YouTube Service class
 class YouTubeService:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, proxy_url: Optional[str] = None, cookies_content: Optional[str] = None):
         self.api_key = api_key
+        self.proxy_url = proxy_url
+        self.cookies_content = cookies_content
         self.youtube = build("youtube", "v3", developerKey=api_key)
+        self.block_detected = False
 
     def resolve_channel_id(self, channel_url_or_id: str) -> Optional[str]:
+        # ... (lines 33-78)
         print(f"DEBUG: Resolving channel ID for: {channel_url_or_id}")
         if not channel_url_or_id:
             return None
@@ -132,10 +138,30 @@ class YouTubeService:
 
     def get_transcript(self, video_id: str) -> List[dict]:
         print(f"DEBUG: Attempting to fetch transcript for video: {video_id}")
+        cookie_file = None
         try:
+            proxies = None
+            if self.proxy_url:
+                print(f"DEBUG: Using proxy for transcript fetch")
+                proxies = {
+                    "http": self.proxy_url,
+                    "https": self.proxy_url
+                }
+            
+            # If cookies are provided, write them to a temp file
+            if self.cookies_content:
+                print(f"DEBUG: Using cookies for transcript fetch")
+                fd, path = tempfile.mkstemp()
+                with os.fdopen(fd, 'w') as tmp:
+                    tmp.write(self.cookies_content)
+                cookie_file = path
+
             ytt_api = YouTubeTranscriptApi()
             # Try fetching in multiple languages
-            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+            transcript = ytt_api.fetch(video_id, 
+                                     languages=['en', 'en-US', 'en-GB'],
+                                     proxies=proxies,
+                                     cookies=cookie_file)
             data = transcript.to_raw_data()
             print(f"DEBUG: Successfully fetched transcript for {video_id} ({len(data)} segments)")
             return data
@@ -143,11 +169,20 @@ class YouTubeService:
             print(f"DEBUG: No transcript found/enabled for {video_id}: {type(e).__name__}")
             return []
         except Exception as e:
-            print(f"DEBUG ERROR: Unexpected error fetching transcript for {video_id}: {e}")
-            # Log the full exception for better debugging in Vercel logs
-            import traceback
-            traceback.print_exc()
+            # Check for block message
+            self.block_detected = True
+            error_msg = str(e)
+            if "blocking requests from your IP" in error_msg:
+                print(f"DEBUG ERROR: YOUTUBE IP BLOCK DETECTED. Please configure PROXY_URL or YT_COOKIES.")
+            else:
+                print(f"DEBUG ERROR: Unexpected error fetching transcript for {video_id}: {error_msg[:200]}")
             return []
+        finally:
+            if cookie_file and os.path.exists(cookie_file):
+                try:
+                    os.remove(cookie_file)
+                except:
+                    pass
 
     def search_in_transcript(self, transcript: List[dict], keyword: str) -> List[dict]:
         matches = []
@@ -187,7 +222,15 @@ async def search(
 
     print(f"DEBUG: Using API Key (start): {api_key[:10]}...")
     
-    service = YouTubeService(api_key)
+    proxy_url = os.getenv("PROXY_URL")
+    if proxy_url:
+        print(f"DEBUG: PROXY_URL is configured")
+    
+    cookies_content = os.getenv("YT_COOKIES")
+    if cookies_content:
+        print(f"DEBUG: YT_COOKIES are configured")
+    
+    service = YouTubeService(api_key, proxy_url=proxy_url, cookies_content=cookies_content)
     
     try:
         channel_id = service.resolve_channel_id(channel_url)
@@ -239,6 +282,13 @@ async def search(
             else:
                 print(f"DEBUG: No transcript found for {video['id']}, skipping.")
         
+        if service.block_detected and not results:
+            print("DEBUG ERROR: Search finished but IP block was detected. Raising 403.")
+            raise HTTPException(
+                status_code=403, 
+                detail="YouTube blocked transcript requests from this IP. Please configure PROXY_URL or YT_COOKIES."
+            )
+
         print(f"DEBUG: Returning {len(results)} results")
         return results
     except HTTPException:

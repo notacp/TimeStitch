@@ -9,9 +9,40 @@ YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 
 class YouTubeService:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, proxy_url: Optional[str] = None):
         self.api_key = api_key
+        self.proxy_url = proxy_url
         self.youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=api_key)
+        self.block_detected = False
+
+    def _get_http_client(self) -> Any:
+        import requests
+        import random
+        
+        session = requests.Session()
+        
+        # Randomize User-Agent to help bypass basic blocks
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+        ]
+        session.headers.update({
+            "User-Agent": random.choice(user_agents),
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        
+        # Configure proxy if provided
+        if self.proxy_url:
+            print("DEBUG: Configuring HTTP Client with Proxy")
+            session.proxies = {
+                "http": self.proxy_url,
+                "https": self.proxy_url
+            }
+            
+        return session
 
     def resolve_channel_id(self, channel_url_or_id: str) -> Optional[str]:
         if not channel_url_or_id:
@@ -101,8 +132,9 @@ class YouTubeService:
     def get_transcript(self, video_id: str) -> List[Dict[str, Any]]:
         """Fetch transcript using the 1.2.x API (instance methods with innertube)."""
         try:
-            # 1.2.x API: create instance and use fetch() with innertube backend
-            ytt_api = YouTubeTranscriptApi()
+            # 1.2.x API: Pass custom http_client for User-Agent rotation and Proxy
+            http_client = self._get_http_client()
+            ytt_api = YouTubeTranscriptApi(http_client=http_client)
             transcript = ytt_api.fetch(video_id, languages=['en', 'en-US'])
             # Convert to raw dictionary format
             return transcript.to_raw_data()
@@ -110,8 +142,16 @@ class YouTubeService:
             print(f"DEBUG: Transcript API error for {video_id}: {type(e).__name__}")
             return []
         except Exception as e:
-            print(f"DEBUG: Unexpected error fetching transcript for {video_id}: {str(e)}")
-            return []
+            error_msg = str(e)
+            if "blocking requests from your IP" in error_msg or "429" in error_msg or "blocked" in error_msg.lower():
+                print(f"DEBUG ERROR: YouTube blocked the request. IP/Block detected for {video_id}.")
+                self.block_detected = True
+            else:
+                print(f"DEBUG ERROR: Unexpected error fetching transcript for {video_id}: {error_msg}")
+            
+            # Re-raise so the router can handle 500s or detect the block state
+            raise
+
 
     def search_in_transcript(self, transcript: List[Dict[str, Any]], keyword: str) -> List[Dict[str, Any]]:
         matches = []

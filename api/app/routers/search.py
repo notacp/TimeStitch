@@ -11,7 +11,8 @@ def get_yt_service():
     api_key = os.getenv("YT_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="YouTube API key not configured")
-    return YouTubeService(api_key)
+    proxy_url = os.getenv("PROXY_URL")
+    return YouTubeService(api_key, proxy_url=proxy_url)
 
 class SearchResult(BaseModel):
     video_id: str
@@ -54,29 +55,50 @@ async def search(
         results = []
         for video in videos:
             print(f"DEBUG: Analyzing Video {video['id']}: '{video['title']}'...")
-            transcript = service.get_transcript(video["id"])
-            if transcript:
-                print(f"DEBUG: Transcript found for {video['id']}. Searching for '{keyword}'...")
-                matches = service.search_in_transcript(transcript, keyword)
-                if matches:
-                    print(f"DEBUG: FOUND {len(matches)} matches in {video['id']}")
-                    results.append(SearchResult(
-                        video_id=video["id"],
-                        title=video["title"],
-                        published_at=video["publishedAt"],
-                        thumbnail=video["thumbnail"],
-                        matches=matches
-                    ))
+            
+            # Catch exceptions here so we don't drop the entire request if one transcript fails
+            try:
+                transcript = service.get_transcript(video["id"])
+                if transcript:
+                    print(f"DEBUG: Transcript found for {video['id']}. Searching for '{keyword}'...")
+                    matches = service.search_in_transcript(transcript, keyword)
+                    if matches:
+                        print(f"DEBUG: FOUND {len(matches)} matches in {video['id']}")
+                        results.append(SearchResult(
+                            video_id=video["id"],
+                            title=video["title"],
+                            published_at=video["publishedAt"],
+                            thumbnail=video["thumbnail"],
+                            matches=matches
+                        ))
+                    else:
+                        print(f"DEBUG: No matches found in {video['id']}")
                 else:
-                    print(f"DEBUG: No matches found in {video['id']}")
-            else:
-                print(f"DEBUG: No transcript found for {video['id']}")
-        
+                    print(f"DEBUG: No transcript found for {video['id']}")
+            except Exception as inner_e:
+                print(f"DEBUG ERROR: Failed analyzing video {video['id']}: {inner_e}")
+                # We log it, but let the loop continue or let block_detected trigger 403 later
+
+        # If we got no results and a block was detected, surface the 403
+        if not results and service.block_detected:
+            print("DEBUG ERROR: Search finished but IP block was detected. Raising 403.")
+            raise HTTPException(
+                status_code=403, 
+                detail="YouTube blocked the request. Please configure PROXY_URL."
+            )
+
         print(f"DEBUG: Returning {len(results)} total video results")
         return results
+        
+    except HTTPException:
+        # Re-raise HTTPExceptions (like our 400 or 403)
+        raise
     except Exception as e:
-        print(f"DEBUG: ERROR in search: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Sanitize internal 500 errors
+        print(f"DEBUG ERROR: Unexpected error in search router: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
 @router.get("/resolve-channel")
 async def resolve_channel(

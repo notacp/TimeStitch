@@ -20,6 +20,7 @@ export default function Home() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [error, setError] = useState("");
   const [selectedVideo, setSelectedVideo] = useState<{ id: string; start: number } | null>(null);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,6 +28,7 @@ export default function Home() {
 
     setIsLoading(true);
     setError("");
+    setErrorStatus(null);
     setResults([]);
     setSelectedVideo(null); // Reset selection on new search
 
@@ -39,6 +41,7 @@ export default function Home() {
       const response = await fetch(url);
 
       if (!response.ok) {
+        setErrorStatus(response.status);
         const errorData = await response.json();
         throw new Error(errorData.detail || "Search failed");
       }
@@ -70,13 +73,30 @@ export default function Home() {
           <TimeRangeSelector timeRange={timeRange} setTimeRange={setTimeRange} />
 
           {error && (
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="text-yt-red mt-4 font-medium"
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 p-4 rounded-xl border border-yt-red/20 bg-yt-red/10 text-yt-red"
             >
-              {error}
-            </motion.p>
+              <h3 className="font-bold flex items-center gap-2 mb-2">
+                <span className="text-xl">⚠️</span>
+                {errorStatus === 403 ? "YouTube IP Block Detected" : "Search Error"}
+              </h3>
+              <p className="font-medium text-sm leading-relaxed">
+                {error}
+              </p>
+              {errorStatus === 403 && (
+                <div className="mt-4 pt-4 border-t border-yt-red/20 text-white/70 text-sm italic">
+                  <p className="mb-2 font-semibold text-white">To fix this on Vercel:</p>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Get a residential proxy URL (e.g., from WebShare, ScraperAPI)</li>
+                    <li>Add it to your Vercel Environment Variables as <code className="bg-white/10 px-1 rounded text-white inline-block mt-1">PROXY_URL</code></li>
+                    <li>Value should look like: <code className="text-white">http://user:pass@proxy-server:port</code></li>
+                    <li>Redeploy the application</li>
+                  </ol>
+                </div>
+              )}
+            </motion.div>
           )}
         </Hero>
 

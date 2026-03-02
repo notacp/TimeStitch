@@ -10,3 +10,7 @@ youtube-transcript-api==1.2.4
 
 # Vercel
 # (Vercel installs these automatically or via this file)
+
+# Testing
+pytest==8.0.0
+httpx==0.27.0
