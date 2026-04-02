@@ -9,9 +9,10 @@ YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 
 class YouTubeService:
-    def __init__(self, api_key: str, proxy_url: Optional[str] = None):
+    def __init__(self, api_key: str, proxy_url: Optional[str] = None, worker_url: Optional[str] = None):
         self.api_key = api_key
         self.proxy_url = proxy_url.strip() if proxy_url and proxy_url.strip() else None
+        self.worker_url = worker_url.rstrip("/") if worker_url and worker_url.strip() else None
         self.youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=api_key)
         self.block_detected = False
         self.proxy_error_detected = False
@@ -132,13 +133,36 @@ class YouTubeService:
         return videos
 
     def get_transcript(self, video_id: str) -> List[Dict[str, Any]]:
-        """Fetch transcript using the 1.2.x API (instance methods with innertube)."""
+        """Fetch transcript via Cloudflare Worker (production) or youtube-transcript-api (local dev)."""
+        if self.worker_url:
+            return self._get_transcript_from_worker(video_id)
+        return self._get_transcript_from_api(video_id)
+
+    def _get_transcript_from_worker(self, video_id: str) -> List[Dict[str, Any]]:
+        """Call the Cloudflare Worker which fetches transcripts from YouTube's edge IPs."""
+        import requests as req
+        url = f"{self.worker_url}/transcript"
         try:
-            # 1.2.x API: Pass custom http_client for User-Agent rotation and Proxy
+            print(f"DEBUG: Fetching transcript via Worker for {video_id}")
+            response = req.get(url, params={"video_id": video_id}, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            if response.status_code == 404:
+                # Worker signals no captions available
+                return []
+            error = response.json().get("error", f"Worker returned {response.status_code}")
+            print(f"DEBUG ERROR: Worker error for {video_id}: {error}")
+            raise Exception(error)
+        except req.RequestException as e:
+            print(f"DEBUG ERROR: Worker request failed for {video_id}: {e}")
+            raise
+
+    def _get_transcript_from_api(self, video_id: str) -> List[Dict[str, Any]]:
+        """Fallback: fetch transcript using youtube-transcript-api (for local dev)."""
+        try:
             http_client = self._get_http_client()
             ytt_api = YouTubeTranscriptApi(http_client=http_client)
             transcript = ytt_api.fetch(video_id, languages=['en', 'en-US'])
-            # Convert to raw dictionary format
             return transcript.to_raw_data()
         except (TranscriptsDisabled, NoTranscriptFound) as e:
             print(f"DEBUG: Transcript API error for {video_id}: {type(e).__name__}")
@@ -171,8 +195,6 @@ class YouTubeService:
                 self.proxy_error_detected = True
             else:
                 print(f"DEBUG ERROR: Unexpected error fetching transcript for {video_id}: {error_msg}")
-            
-            # Re-raise so the router can handle 500s or detect the block state
             raise
 
 

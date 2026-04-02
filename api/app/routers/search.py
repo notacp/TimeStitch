@@ -12,11 +12,14 @@ def get_yt_service():
     if not api_key:
         raise HTTPException(status_code=500, detail="YouTube API key not configured")
     proxy_url = os.getenv("PROXY_URL")
-    if proxy_url:
+    worker_url = os.getenv("TRANSCRIPT_WORKER_URL")
+    if worker_url:
+        print(f"DEBUG: Using Cloudflare Worker for transcripts: {worker_url}")
+    elif proxy_url:
         print("DEBUG: PROXY_URL is configured for transcript requests.")
     else:
-        print("DEBUG: PROXY_URL is not configured.")
-    return YouTubeService(api_key, proxy_url=proxy_url)
+        print("DEBUG: No Worker or proxy configured — using direct transcript API (local dev only).")
+    return YouTubeService(api_key, proxy_url=proxy_url, worker_url=worker_url)
 
 class SearchResult(BaseModel):
     video_id: str
