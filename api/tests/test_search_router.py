@@ -27,6 +27,7 @@ def test_search_router_success(mock_yt_service_class):
     mock_service.get_transcript.return_value = [{"start": 0, "text": "mock transcript"}]
     mock_service.search_in_transcript.return_value = [{"start": 0, "text": "mock match", "context_before": "", "context_after": ""}]
     mock_service.block_detected = False
+    mock_service.proxy_error_detected = False
     
     response = client.get("/api/search?channel_url=fake&keyword=mock")
     
@@ -48,12 +49,30 @@ def test_search_router_returns_403_on_block(mock_yt_service_class):
     # Simulate a transcript fetch that sets the block_detected flag
     mock_service.get_transcript.return_value = []
     mock_service.block_detected = True
+    mock_service.proxy_error_detected = False
     
     response = client.get("/api/search?channel_url=fake&keyword=mock")
     
     # Assert we surface the 403
     assert response.status_code == 403
     assert "YouTube blocked the request" in response.json()["detail"]
+
+@patch("api.app.routers.search.YouTubeService")
+def test_search_router_returns_502_on_proxy_error(mock_yt_service_class):
+    mock_service = MagicMock()
+    mock_yt_service_class.return_value = mock_service
+
+    mock_service.resolve_channel_id.return_value = "UC123"
+    mock_service.fetch_uploads_playlist_id.return_value = "PL123"
+    mock_service.fetch_videos.return_value = [{"id": "vid1", "title": "Test", "publishedAt": "2024-01-01T00:00:00Z", "thumbnail": ""}]
+    mock_service.get_transcript.side_effect = Exception("ProxyError: 407 Proxy Authentication Required")
+    mock_service.block_detected = False
+    mock_service.proxy_error_detected = True
+
+    response = client.get("/api/search?channel_url=fake&keyword=mock")
+
+    assert response.status_code == 502
+    assert "Proxy connection failed" in response.json()["detail"]
 
 @patch("api.app.routers.search.YouTubeService")
 def test_search_router_sanitizes_500_errors(mock_yt_service_class):

@@ -11,15 +11,17 @@ YOUTUBE_API_VERSION = "v3"
 class YouTubeService:
     def __init__(self, api_key: str, proxy_url: Optional[str] = None):
         self.api_key = api_key
-        self.proxy_url = proxy_url
+        self.proxy_url = proxy_url.strip() if proxy_url and proxy_url.strip() else None
         self.youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=api_key)
         self.block_detected = False
+        self.proxy_error_detected = False
 
     def _get_http_client(self) -> Any:
         import requests
         import random
         
         session = requests.Session()
+        session.trust_env = False
         
         # Randomize User-Agent to help bypass basic blocks
         user_agents = [
@@ -143,9 +145,30 @@ class YouTubeService:
             return []
         except Exception as e:
             error_msg = str(e)
-            if "blocking requests from your IP" in error_msg or "429" in error_msg or "blocked" in error_msg.lower():
-                print(f"DEBUG ERROR: YouTube blocked the request. IP/Block detected for {video_id}.")
+            error_msg_lower = error_msg.lower()
+
+            if (
+                "blocking requests from your ip" in error_msg_lower
+                or "blocked" in error_msg_lower
+                or "429" in error_msg_lower
+                or "too many requests" in error_msg_lower
+            ):
+                print(
+                    f"DEBUG ERROR: YouTube blocked transcript request for {video_id}. "
+                    f"proxy_configured={bool(self.proxy_url)}"
+                )
                 self.block_detected = True
+            elif (
+                "proxy" in error_msg_lower
+                or "407" in error_msg_lower
+                or "tunnel connection failed" in error_msg_lower
+                or "cannot connect to proxy" in error_msg_lower
+                or "proxyerror" in error_msg_lower
+            ):
+                print(
+                    f"DEBUG ERROR: Proxy failure while fetching transcript for {video_id}: {error_msg}"
+                )
+                self.proxy_error_detected = True
             else:
                 print(f"DEBUG ERROR: Unexpected error fetching transcript for {video_id}: {error_msg}")
             

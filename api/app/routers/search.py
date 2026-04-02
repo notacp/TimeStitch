@@ -12,6 +12,10 @@ def get_yt_service():
     if not api_key:
         raise HTTPException(status_code=500, detail="YouTube API key not configured")
     proxy_url = os.getenv("PROXY_URL")
+    if proxy_url:
+        print("DEBUG: PROXY_URL is configured for transcript requests.")
+    else:
+        print("DEBUG: PROXY_URL is not configured.")
     return YouTubeService(api_key, proxy_url=proxy_url)
 
 class SearchResult(BaseModel):
@@ -79,12 +83,27 @@ async def search(
                 print(f"DEBUG ERROR: Failed analyzing video {video['id']}: {inner_e}")
                 # We log it, but let the loop continue or let block_detected trigger 403 later
 
-        # If we got no results and a block was detected, surface the 403
+        # If we got no results and proxy failures happened, surface a sanitized 502.
+        if not results and getattr(service, "proxy_error_detected", False):
+            print("DEBUG ERROR: Search finished but proxy errors were detected. Raising 502.")
+            raise HTTPException(
+                status_code=502,
+                detail="Proxy connection failed. Verify PROXY_URL format and credentials."
+            )
+
+        # If we got no results and a block was detected, surface the 403.
         if not results and service.block_detected:
             print("DEBUG ERROR: Search finished but IP block was detected. Raising 403.")
+            if getattr(service, "proxy_url", None):
+                detail = (
+                    "YouTube blocked the request even with PROXY_URL. "
+                    "Verify proxy quality, rotation, and credentials."
+                )
+            else:
+                detail = "YouTube blocked the request. Please configure PROXY_URL."
             raise HTTPException(
                 status_code=403, 
-                detail="YouTube blocked the request. Please configure PROXY_URL."
+                detail=detail
             )
 
         print(f"DEBUG: Returning {len(results)} total video results")
