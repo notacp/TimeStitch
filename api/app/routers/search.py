@@ -94,6 +94,14 @@ async def search(
                 detail="Proxy connection failed. Verify PROXY_URL format and credentials."
             )
 
+        # If worker is configured but every transcript call failed, surface a 502.
+        if not results and getattr(service, "worker_url", None) and getattr(service, "worker_failures", 0) > 0:
+            print("DEBUG ERROR: Search finished but all Worker transcript calls failed. Raising 502.")
+            raise HTTPException(
+                status_code=502,
+                detail="Cloudflare Worker failed to fetch transcripts. Check that the Worker is deployed and TRANSCRIPT_WORKER_URL is correct."
+            )
+
         # If we got no results and a block was detected, surface the 403.
         if not results and service.block_detected:
             print("DEBUG ERROR: Search finished but IP block was detected. Raising 403.")

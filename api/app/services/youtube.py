@@ -16,6 +16,7 @@ class YouTubeService:
         self.youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=api_key)
         self.block_detected = False
         self.proxy_error_detected = False
+        self.worker_failures = 0
 
     def _get_http_client(self) -> Any:
         import requests
@@ -153,7 +154,8 @@ class YouTubeService:
             error = response.json().get("error", f"Worker returned {response.status_code}")
             print(f"DEBUG ERROR: Worker error for {video_id}: {error}")
             raise Exception(error)
-        except req.RequestException as e:
+        except Exception as e:
+            self.worker_failures += 1
             print(f"DEBUG ERROR: Worker request failed for {video_id}: {e}")
             raise
 
