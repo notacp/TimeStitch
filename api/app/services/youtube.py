@@ -1,6 +1,10 @@
 import os
 import re
 from typing import List, Optional, Dict, Any
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    """Case-insensitive whole-word match so 'CRED' doesn't match 'incredible'."""
+    return bool(re.search(r'\b' + re.escape(keyword) + r'\b', text, re.IGNORECASE | re.UNICODE))
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -105,10 +109,10 @@ class YouTubeService:
 
         return response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    def fetch_videos(self, playlist_id: str, max_videos: int = 50) -> List[Dict[str, Any]]:
+    def fetch_videos(self, playlist_id: str, max_videos: int = 50, exclude_shorts: bool = False) -> List[Dict[str, Any]]:
         videos = []
         next_page_token = None
-        
+
         while len(videos) < max_videos:
             response = self.youtube.playlistItems().list(
                 part="contentDetails,snippet",
@@ -130,8 +134,38 @@ class YouTubeService:
             next_page_token = response.get('nextPageToken')
             if not next_page_token:
                 break
-                
+
+        if exclude_shorts and videos:
+            videos = self._filter_out_shorts(videos)
+
         return videos
+
+    def _filter_out_shorts(self, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove Shorts (duration <= 60s) via a batched videos.list call."""
+        import re
+        video_ids = [v["id"] for v in videos if v["id"]]
+
+        # videos.list accepts up to 50 IDs per request
+        durations = {}
+        for i in range(0, len(video_ids), 50):
+            batch = video_ids[i:i + 50]
+            response = self.youtube.videos().list(
+                part="contentDetails",
+                id=",".join(batch)
+            ).execute()
+            for item in response.get("items", []):
+                duration_str = item.get("contentDetails", {}).get("duration", "PT0S")
+                # ISO 8601 duration e.g. PT1M30S, PT59S, P0D
+                total_seconds = 0
+                for value, unit in re.findall(r"(\d+)([HMSD])", duration_str):
+                    if unit == "H": total_seconds += int(value) * 3600
+                    elif unit == "M": total_seconds += int(value) * 60
+                    elif unit == "S": total_seconds += int(value)
+                durations[item["id"]] = total_seconds
+
+        filtered = [v for v in videos if durations.get(v["id"], 61) > 60]
+        print(f"DEBUG: Filtered out {len(videos) - len(filtered)} Shorts (≤60s) from {len(videos)} videos")
+        return filtered
 
     def get_transcript(self, video_id: str) -> List[Dict[str, Any]]:
         """Fetch transcript via Cloudflare Worker (production) or youtube-transcript-api (local dev)."""
@@ -164,7 +198,7 @@ class YouTubeService:
         try:
             http_client = self._get_http_client()
             ytt_api = YouTubeTranscriptApi(http_client=http_client)
-            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US'])
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'hi'])
             return transcript.to_raw_data()
         except (TranscriptsDisabled, NoTranscriptFound) as e:
             print(f"DEBUG: Transcript API error for {video_id}: {type(e).__name__}")
@@ -200,11 +234,14 @@ class YouTubeService:
             raise
 
 
-    def search_in_transcript(self, transcript: List[Dict[str, Any]], keyword: str) -> List[Dict[str, Any]]:
+    def search_in_transcript(self, transcript: List[Dict[str, Any]], keyword: str, extra_keywords: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Search transcript for keyword and any extra translated variants."""
+        all_keywords = [keyword] + list(extra_keywords or [])
+        seen_starts = set()
         matches = []
-        keyword_lower = keyword.lower()
         for i, segment in enumerate(transcript):
-            if keyword_lower in segment['text'].lower():
+            if any(_keyword_matches(segment['text'], k) for k in all_keywords) and segment['start'] not in seen_starts:
+                seen_starts.add(segment['start'])
                 matches.append({
                     "start": segment['start'],
                     "text": segment['text'],

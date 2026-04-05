@@ -9,6 +9,8 @@ interface SearchFormProps {
     setKeyword: (keyword: string) => void;
     handleSearch: (e: FormEvent) => void;
     isLoading: boolean;
+    excludeShorts: boolean;
+    setExcludeShorts: (v: boolean) => void;
 }
 
 export function SearchForm({
@@ -18,6 +20,8 @@ export function SearchForm({
     setKeyword,
     handleSearch,
     isLoading,
+    excludeShorts,
+    setExcludeShorts,
 }: SearchFormProps) {
     return (
         <motion.form
@@ -48,6 +52,15 @@ export function SearchForm({
                 />
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-yt-light-gray" />
             </div>
+            <label className="flex items-center gap-2 px-4 cursor-pointer select-none text-sm text-yt-light-gray whitespace-nowrap">
+                <input
+                    type="checkbox"
+                    checked={excludeShorts}
+                    onChange={(e) => setExcludeShorts(e.target.checked)}
+                    className="accent-yt-red w-4 h-4"
+                />
+                No Shorts
+            </label>
             <button
                 disabled={isLoading}
                 className="bg-yt-red hover:bg-yt-red/90 disabled:opacity-50 disabled:cursor-not-allowed text-white px-8 py-4 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all active:scale-95 md:w-auto w-full"

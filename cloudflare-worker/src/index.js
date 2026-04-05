@@ -8,133 +8,126 @@
  * Returns: [{ text, start, duration }, ...]  (same shape as youtube-transcript-api)
  */
 
-const INNERTUBE_URL = "https://www.youtube.com/youtubei/v1/player";
-
-// ANDROID client reliably includes captionTracks in the player response.
-// The WEB client often omits them depending on YouTube's server-side flags.
-const INNERTUBE_CONTEXT = {
-  client: {
-    clientName: "ANDROID",
-    clientVersion: "17.31.35",
-    androidSdkVersion: 30,
-    hl: "en",
-    gl: "US",
-    osName: "Android",
-    osVersion: "11",
-  },
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
-const USER_AGENT = "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip";
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Health check
-    if (url.pathname === "/") {
-      return json({ status: "ok" });
+    if (url.pathname === "/") return json({ status: "ok" });
+
+    if (url.pathname === "/debug") {
+      const videoId = url.searchParams.get("video_id") ?? "dQw4w9WgXcQ";
+      const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers: BROWSER_HEADERS });
+      const body = await res.text();
+      return json({
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        body_length: body.length,
+        body_preview: body.slice(0, 300),
+      });
     }
 
-    if (url.pathname !== "/transcript") {
-      return json({ error: "Not found" }, 404);
-    }
+    if (url.pathname !== "/transcript") return json({ error: "Not found" }, 404);
 
     const videoId = url.searchParams.get("video_id");
-    if (!videoId) {
-      return json({ error: "video_id query param is required" }, 400);
-    }
+    if (!videoId) return json({ error: "video_id query param is required" }, 400);
 
     try {
       const transcript = await fetchTranscript(videoId);
       return json(transcript);
     } catch (e) {
-      const status = e.status ?? 500;
-      return json({ error: e.message }, status);
+      return json({ error: e.message }, e.status ?? 500);
     }
   },
 };
 
 async function fetchTranscript(videoId) {
-  // Step 1 — Ask YouTube's InnerTube API for the player data.
-  // InnerTube is YouTube's internal JSON API used by the web player itself.
-  // It returns caption track URLs as part of the player response.
-  const playerRes = await fetch(INNERTUBE_URL, {
-    method: "POST",
+  // Step 1 — Fetch the YouTube watch page.
+  // This gives us the signed caption track URLs embedded in ytInitialPlayerResponse.
+  // Cloudflare's HTTP client has a browser-like TLS fingerprint, so this isn't blocked.
+  const watchRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: BROWSER_HEADERS,
+  });
+
+  if (!watchRes.ok) throw httpError(watchRes.status, `Watch page fetch failed: ${watchRes.status}`);
+
+  // Capture session cookies — required for the subsequent timedtext fetch
+  const cookies = (watchRes.headers.getSetCookie?.() ?? [])
+    .map(c => c.split(";")[0])
+    .join("; ");
+
+  const html = await watchRes.text();
+
+  // Step 2 — Extract ytInitialPlayerResponse from the HTML.
+  // YouTube embeds the full player config as a JS variable in the page.
+  // We walk forward matching braces to safely extract the JSON without regex.
+  const marker = "ytInitialPlayerResponse = ";
+  const markerIdx = html.indexOf(marker);
+  if (markerIdx === -1) throw httpError(500, "ytInitialPlayerResponse not found in watch page");
+
+  let depth = 0, i = markerIdx + marker.length;
+  for (; i < html.length; i++) {
+    if (html[i] === "{") depth++;
+    else if (html[i] === "}") { if (--depth === 0) break; }
+  }
+
+  const playerData = JSON.parse(html.slice(markerIdx + marker.length, i + 1));
+  const tracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+  if (!tracks?.length) throw httpError(404, "No captions available for this video");
+
+  // Step 3 — Pick the best English track.
+  // Prefer manual captions over auto-generated ("asr") ones for better quality.
+  const track =
+    tracks.find(t => (t.languageCode === "en" || t.languageCode === "en-US") && t.kind !== "asr") ??
+    tracks.find(t => t.languageCode === "en" || t.languageCode === "en-US") ??
+    tracks[0];
+
+  // Step 4 — Fetch the caption XML.
+  // The baseUrl is a signed timedtext URL. We include cookies from the watch page
+  // and the Referer header to satisfy YouTube's same-origin expectations.
+  const captionRes = await fetch(track.baseUrl, {
     headers: {
-      "Content-Type": "application/json",
-      "User-Agent": USER_AGENT,
+      ...BROWSER_HEADERS,
+      "Referer": `https://www.youtube.com/watch?v=${videoId}`,
+      ...(cookies ? { "Cookie": cookies } : {}),
     },
-    body: JSON.stringify({
-      context: INNERTUBE_CONTEXT,
-      videoId,
-    }),
   });
 
-  if (!playerRes.ok) {
-    throw httpError(playerRes.status, `InnerTube player API returned ${playerRes.status}`);
+  if (!captionRes.ok) throw httpError(captionRes.status, `Caption fetch failed: ${captionRes.status}`);
+
+  const xml = await captionRes.text();
+  if (!xml.trim()) throw httpError(500, "Caption response was empty");
+
+  // Step 5 — Parse XML into [{text, start, duration}].
+  // The timedtext XML format: <text start="1.23" dur="2.00">Hello world</text>
+  const segments = [];
+  const re = /<text start="([^"]+)" dur="([^"]+)"[^>]*>([\s\S]*?)<\/text>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const text = m[3]
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/\n/g, " ")
+      .trim();
+    if (text) segments.push({ text, start: parseFloat(m[1]), duration: parseFloat(m[2]) });
   }
 
-  const playerData = await playerRes.json();
-  const tracks =
-    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-  if (!tracks || tracks.length === 0) {
-    throw httpError(404, "No captions available for this video");
-  }
-
-  // Step 2 — Pick the best English track (manual > auto-generated).
-  // captionTracks entries have a `kind` field: "asr" = auto-generated.
-  // We prefer manual captions but fall back to auto-generated if needed.
-  const manualEn = tracks.find(
-    (t) => (t.languageCode === "en" || t.languageCode === "en-US") && t.kind !== "asr"
-  );
-  const autoEn = tracks.find(
-    (t) => (t.languageCode === "en" || t.languageCode === "en-US") && t.kind === "asr"
-  );
-  const track = manualEn ?? autoEn ?? tracks[0];
-
-  // Step 3 — Fetch the transcript in JSON format.
-  // YouTube's timedtext endpoint serves captions as XML by default.
-  // Appending &fmt=json3 gets a cleaner JSON response with timed events.
-  const captionUrl = `${track.baseUrl}&fmt=json3`;
-  const captionRes = await fetch(captionUrl, {
-    headers: { "User-Agent": USER_AGENT },
-  });
-
-  if (!captionRes.ok) {
-    throw httpError(captionRes.status, `Caption fetch failed with ${captionRes.status}`);
-  }
-
-  const captionData = await captionRes.json();
-
-  // Step 4 — Normalise into [{text, start, duration}].
-  // json3 format has an "events" array. Each event has:
-  //   tStartMs  — start time in milliseconds
-  //   dDurationMs — duration in milliseconds
-  //   segs      — array of text segments (each with utf8 field)
-  // Events without segs are styling/layout events — we skip those.
-  return (captionData.events ?? [])
-    .filter((e) => e.segs)
-    .map((e) => ({
-      text: e.segs
-        .map((s) => s.utf8 ?? "")
-        .join("")
-        .replace(/\n/g, " ")
-        .trim(),
-      start: (e.tStartMs ?? 0) / 1000,
-      duration: (e.dDurationMs ?? 0) / 1000,
-    }))
-    .filter((e) => e.text.length > 0);
+  return segments;
 }
-
-// --- helpers ---
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
   });
 }
 

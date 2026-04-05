@@ -5,6 +5,19 @@ from datetime import datetime
 import os
 from pydantic import BaseModel
 
+def translate_keyword(keyword: str, target_lang: str) -> Optional[str]:
+    """Translate keyword to target language. Returns None silently if translation fails."""
+    try:
+        from deep_translator import GoogleTranslator
+        translated = GoogleTranslator(source="auto", target=target_lang).translate(keyword)
+        # Only return if it's actually different (i.e. a real translation happened)
+        if translated and translated.lower() != keyword.lower():
+            print(f"DEBUG: Translated '{keyword}' → '{translated}' ({target_lang})")
+            return translated
+    except Exception as e:
+        print(f"DEBUG: Translation failed ({target_lang}): {e}")
+    return None
+
 router = APIRouter()
 
 def get_yt_service():
@@ -34,6 +47,7 @@ async def search(
     keyword: str,
     max_videos: int = 20,
     published_after: Optional[str] = None,
+    exclude_shorts: bool = False,
     service: YouTubeService = Depends(get_yt_service)
 ):
     channel_id = service.resolve_channel_id(channel_url)
@@ -42,9 +56,9 @@ async def search(
 
     try:
         playlist_id = service.fetch_uploads_playlist_id(channel_id)
-        # Fetch more videos initially to account for date filtering
-        fetch_count = max_videos * 3 if published_after else max_videos
-        videos = service.fetch_videos(playlist_id, max_videos=fetch_count)
+        # Fetch more videos initially to account for date filtering and Shorts exclusion
+        fetch_count = max_videos * 3 if (published_after or exclude_shorts) else max_videos
+        videos = service.fetch_videos(playlist_id, max_videos=fetch_count, exclude_shorts=exclude_shorts)
 
         # Filter by published_after date if provided
         if published_after:
@@ -58,17 +72,21 @@ async def search(
                 print(f"DEBUG: Invalid date format: {published_after}, error: {e}")
 
         print(f"DEBUG: Found {len(videos)} videos in playlist {playlist_id} (after date filter)")
-        
+
+        # Translate keyword to Hindi once — reused for all videos in this search
+        hindi_keyword = translate_keyword(keyword, "hi")
+        extra_keywords = [hindi_keyword] if hindi_keyword else []
+
         results = []
         for video in videos:
             print(f"DEBUG: Analyzing Video {video['id']}: '{video['title']}'...")
-            
+
             # Catch exceptions here so we don't drop the entire request if one transcript fails
             try:
                 transcript = service.get_transcript(video["id"])
                 if transcript:
                     print(f"DEBUG: Transcript found for {video['id']}. Searching for '{keyword}'...")
-                    matches = service.search_in_transcript(transcript, keyword)
+                    matches = service.search_in_transcript(transcript, keyword, extra_keywords=extra_keywords)
                     if matches:
                         print(f"DEBUG: FOUND {len(matches)} matches in {video['id']}")
                         results.append(SearchResult(

@@ -16,11 +16,14 @@ export default function Home() {
   const [channelUrl, setChannelUrl] = useState("");
   const [keyword, setKeyword] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
+  const [excludeShorts, setExcludeShorts] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [error, setError] = useState("");
   const [selectedVideo, setSelectedVideo] = useState<{ id: string; start: number } | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [lastSearch, setLastSearch] = useState<{ channel: string; keyword: string } | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,13 +33,17 @@ export default function Home() {
     setError("");
     setErrorStatus(null);
     setResults([]);
-    setSelectedVideo(null); // Reset selection on new search
+    setSelectedVideo(null);
+    setHasSearched(false);
 
     try {
       const publishedAfter = getPublishedAfterDate(timeRange);
       let url = `/api/search?channel_url=${encodeURIComponent(channelUrl)}&keyword=${encodeURIComponent(keyword)}&max_videos=20`;
       if (publishedAfter) {
         url += `&published_after=${encodeURIComponent(publishedAfter)}`;
+      }
+      if (excludeShorts) {
+        url += `&exclude_shorts=true`;
       }
       const response = await fetch(url);
 
@@ -48,10 +55,12 @@ export default function Home() {
 
       const data = await response.json();
       setResults(data);
+      setLastSearch({ channel: channelUrl, keyword });
     } catch (err: any) {
       setError(err.message);
     } finally {
       setIsLoading(false);
+      setHasSearched(true);
     }
   };
 
@@ -61,7 +70,7 @@ export default function Home() {
       <Header />
 
       <div className="relative z-10 max-w-7xl mx-auto px-6 py-20">
-        <Hero isCompact={results.length > 0}>
+        <Hero isCompact={results.length > 0 || (hasSearched && !isLoading)}>
           <SearchForm
             channelUrl={channelUrl}
             setChannelUrl={setChannelUrl}
@@ -69,8 +78,20 @@ export default function Home() {
             setKeyword={setKeyword}
             handleSearch={handleSearch}
             isLoading={isLoading}
+            excludeShorts={excludeShorts}
+            setExcludeShorts={setExcludeShorts}
           />
           <TimeRangeSelector timeRange={timeRange} setTimeRange={setTimeRange} />
+
+          {isLoading && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="mt-4 text-sm text-yt-light-gray text-center"
+            >
+              Scanning videos for &ldquo;{keyword}&rdquo;… this may take up to 30 seconds
+            </motion.p>
+          )}
 
           {error && (
             <motion.div
@@ -80,25 +101,44 @@ export default function Home() {
             >
               <h3 className="font-bold flex items-center gap-2 mb-2">
                 <span className="text-xl">⚠️</span>
-                {errorStatus === 403 ? "YouTube IP Block Detected" : "Search Error"}
+                {errorStatus === 403 || errorStatus === 502
+                  ? "Something went wrong on our end"
+                  : errorStatus === 400
+                  ? "Channel not found"
+                  : "Search failed"}
               </h3>
-              <p className="font-medium text-sm leading-relaxed">
-                {error}
+              <p className="font-medium text-sm leading-relaxed text-yt-red/80">
+                {errorStatus === 403 || errorStatus === 502
+                  ? "YouTube is temporarily blocking our server. This usually resolves itself — try again in a few minutes."
+                  : errorStatus === 400
+                  ? "We couldn't find that YouTube channel. Double-check the URL or @handle and try again."
+                  : "Something went wrong. Please try again."}
               </p>
-              {errorStatus === 403 && (
-                <div className="mt-4 pt-4 border-t border-yt-red/20 text-white/70 text-sm italic">
-                  <p className="mb-2 font-semibold text-white">To fix this on Vercel:</p>
-                  <ol className="list-decimal list-inside space-y-1">
-                    <li>Get a residential proxy URL (e.g., from WebShare, ScraperAPI)</li>
-                    <li>Add it to your Vercel Environment Variables as <code className="bg-white/10 px-1 rounded text-white inline-block mt-1">PROXY_URL</code></li>
-                    <li>Value should look like: <code className="text-white">http://user:pass@proxy-server:port</code></li>
-                    <li>Redeploy the application</li>
-                  </ol>
-                </div>
-              )}
             </motion.div>
           )}
         </Hero>
+
+        {/* Empty state */}
+        {hasSearched && !isLoading && !error && results.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-16 text-center"
+          >
+            <div className="text-5xl mb-4">🔍</div>
+            <h3 className="text-xl font-semibold text-white mb-2">No mentions found</h3>
+            <p className="text-yt-light-gray text-sm max-w-md mx-auto">
+              {lastSearch
+                ? <>Couldn&apos;t find <span className="text-white font-medium">&ldquo;{lastSearch.keyword}&rdquo;</span> in any recent videos from this channel. Try a different keyword or expand the time range.</>
+                : "No results found. Try a different keyword or expand the time range."}
+            </p>
+            <ul className="mt-4 text-yt-light-gray text-sm space-y-1">
+              <li>• Make sure the keyword spelling is correct</li>
+              <li>• Try a broader time range (e.g. &ldquo;All time&rdquo;)</li>
+              <li>• The channel may not have transcripts enabled</li>
+            </ul>
+          </motion.div>
+        )}
 
         {/* Results Section */}
         {results.length > 0 && (

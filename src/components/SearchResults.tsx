@@ -9,8 +9,16 @@ interface SearchResultsProps {
 }
 
 export function SearchResults({ results, onSelectVideo }: SearchResultsProps) {
+    const totalMatches = results.reduce((sum, v) => sum + v.matches.length, 0);
+
     return (
         <div className="space-y-6">
+            <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-white">Results</h2>
+                <span className="text-sm text-yt-light-gray">
+                    {totalMatches} mention{totalMatches !== 1 ? "s" : ""} across {results.length} video{results.length !== 1 ? "s" : ""}
+                </span>
+            </div>
             <AnimatePresence>
                 {results.map((video, idx) => (
                     <motion.div
