@@ -148,6 +148,32 @@ async def search(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
+@router.get("/suggest-channels")
+async def suggest_channels(
+    q: str = "",
+    service: YouTubeService = Depends(get_yt_service)
+):
+    if len(q.strip()) < 2:
+        return []
+    try:
+        response = service.youtube.search().list(
+            part="snippet",
+            q=q,
+            type="channel",
+            maxResults=5
+        ).execute()
+        return [
+            {
+                "id": item["id"]["channelId"],
+                "title": item["snippet"]["title"],
+                "thumbnail": item["snippet"].get("thumbnails", {}).get("default", {}).get("url", ""),
+            }
+            for item in response.get("items", [])
+        ]
+    except Exception as e:
+        print(f"DEBUG: suggest-channels error: {e}")
+        return []
+
 @router.get("/resolve-channel")
 async def resolve_channel(
     channel_url: str,

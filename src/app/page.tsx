@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import { SearchResult, TimeRange } from "@/types";
+import { SearchResult, TimeRange, ChannelSuggestion } from "@/types";
 import { getPublishedAfterDate } from "@/lib/utils";
 import { Header } from "@/components/Header";
 import { Hero } from "@/components/Hero";
@@ -13,7 +13,9 @@ import { VideoPlayer } from "@/components/VideoPlayer";
 import { BackgroundEffect } from "@/components/BackgroundEffect";
 
 export default function Home() {
-  const [channelUrl, setChannelUrl] = useState("");
+  const [channelUrl, setChannelUrl] = useState("");       // resolved value sent to API
+  const [channelDisplay, setChannelDisplay] = useState(""); // what's shown in the input
+  const [suggestions, setSuggestions] = useState<ChannelSuggestion[]>([]);
   const [keyword, setKeyword] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
   const [excludeShorts, setExcludeShorts] = useState(false);
@@ -25,6 +27,35 @@ export default function Home() {
   const [hasSearched, setHasSearched] = useState(false);
   const [lastSearch, setLastSearch] = useState<{ channel: string; keyword: string } | null>(null);
 
+  useEffect(() => {
+    if (channelDisplay.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/suggest-channels?q=${encodeURIComponent(channelDisplay)}`);
+        if (res.ok) setSuggestions(await res.json());
+      } catch {
+        // suggestions are best-effort, ignore errors
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [channelDisplay]);
+
+  const handleSelectSuggestion = (suggestion: ChannelSuggestion) => {
+    setChannelDisplay(suggestion.title);
+    setChannelUrl(suggestion.id);
+    setSuggestions([]);
+  };
+
+  const handleDismissSuggestions = () => setSuggestions([]);
+
+  const handleChannelInputChange = (value: string) => {
+    setChannelDisplay(value);
+    setChannelUrl(value); // keep in sync while user is typing manually
+  };
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!channelUrl || !keyword) return;
@@ -35,6 +66,7 @@ export default function Home() {
     setResults([]);
     setSelectedVideo(null);
     setHasSearched(false);
+    setSuggestions([]);
 
     try {
       const publishedAfter = getPublishedAfterDate(timeRange);
@@ -72,8 +104,11 @@ export default function Home() {
       <div className="relative z-10 max-w-7xl mx-auto px-6 py-20">
         <Hero isCompact={results.length > 0 || (hasSearched && !isLoading)}>
           <SearchForm
-            channelUrl={channelUrl}
-            setChannelUrl={setChannelUrl}
+            channelDisplay={channelDisplay}
+            onChannelChange={handleChannelInputChange}
+            onDismissSuggestions={handleDismissSuggestions}
+            suggestions={suggestions}
+            onSelectSuggestion={handleSelectSuggestion}
             keyword={keyword}
             setKeyword={setKeyword}
             handleSearch={handleSearch}

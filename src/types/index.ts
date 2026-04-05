@@ -14,3 +14,9 @@ export interface SearchResult {
 }
 
 export type TimeRange = "7d" | "30d" | "6m" | "1y" | "all";
+
+export interface ChannelSuggestion {
+    id: string;
+    title: string;
+    thumbnail: string;
+}
