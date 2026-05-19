@@ -28,6 +28,43 @@ type ExtractResult = {
 
 const FETCH_TIMEOUT_MS = 10_000;
 
+// Hard ceiling on total time spent extracting ONE video's transcript across
+// every strategy (3 InnerTube clients + tab fallback + retry ladders). Without
+// this, a single pathological video can burn minutes; telemetry showed search
+// p-max ~487s. ~15s keeps typical videos (~11s) untouched while capping the
+// tail. New search worst case ≈ ceil(videos / concurrency) * this.
+const PER_VIDEO_BUDGET_MS = 15_000;
+
+// Race a transcript-extraction attempt against PER_VIDEO_BUDGET_MS.
+//
+// Returning early is NOT enough — the SW keeps running fetches after the worker
+// moved on, which is what makes searches "keep going and going". The budget
+// must actually CANCEL in-flight work, so `signal` is threaded into every
+// downstream fetch (tryClient / fetchTimedTextXml) via AbortSignal.any([...]).
+// The tab fallback can't take a signal across the MAIN-world boundary, so it
+// is instead gated on signal.aborted and given an absolute deadline.
+//
+// Budget expiry resolves to a synthetic failed result (not a throw): the
+// caller counts `failure_reason`, and a throw would surface as a rejected
+// message → mislabelled `unknown`. `budget_exceeded` keeps it observable.
+async function runWithVideoBudget(
+  attempt: (signal: AbortSignal) => Promise<FetchTranscriptResult>,
+): Promise<FetchTranscriptResult> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<FetchTranscriptResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ transcript: null, failure_reason: "budget_exceeded" });
+    }, PER_VIDEO_BUDGET_MS);
+  });
+  try {
+    return await Promise.race([attempt(controller.signal), budget]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 // ─── Header-spoof rules ──────────────────────────────────────────────────────
 // Rewrite Origin/Referer on extension-initiated requests to YouTube endpoints
 // so they look like they come from a real youtube.com page. Scoped to
@@ -217,12 +254,34 @@ function parseXml(xml: string): Segment[] {
   return segs;
 }
 
-async function fetchTimedTextXml(baseUrl: string): Promise<{ xml: string | null; err: string }> {
+async function fetchTimedTextXml(
+  baseUrl: string,
+  budget: AbortSignal,
+): Promise<{ xml: string | null; err: string }> {
   const delays = [0, 1500, 3000];
   for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt]) await new Promise<void>((r) => setTimeout(r, delays[attempt]));
+    if (budget.aborted) return { xml: null, err: "budget" };
+    if (delays[attempt]) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, delays[attempt]);
+          budget.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(t);
+              reject(new DOMException("budget", "AbortError"));
+            },
+            { once: true },
+          );
+        });
+      } catch {
+        return { xml: null, err: "budget" };
+      }
+    }
     try {
-      const res = await fetch(baseUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      const res = await fetch(baseUrl, {
+        signal: AbortSignal.any([AbortSignal.timeout(FETCH_TIMEOUT_MS), budget]),
+      });
       if (res.status === 429) continue;
       if (!res.ok) return { xml: null, err: `status=${res.status}` };
       const text = await res.text();
@@ -251,8 +310,10 @@ async function tryClient(
   videoId: string,
   preferredLangs: string[],
   client: InnertubeClient,
+  budget: AbortSignal,
 ): Promise<ExtractResult> {
   const prefix = `sw-${client.clientName.toLowerCase()}-`;
+  if (budget.aborted) return { _debug: `${prefix}budget` };
   try {
     const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
       method: "POST",
@@ -261,7 +322,7 @@ async function tryClient(
         context: { client: { clientName: client.clientName, clientVersion: client.clientVersion } },
         videoId,
       }),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.any([AbortSignal.timeout(FETCH_TIMEOUT_MS), budget]),
     });
     if (!res.ok) return { _debug: `${prefix}status=${res.status}` };
     const data = await res.json();
@@ -269,7 +330,7 @@ async function tryClient(
     if (!tracks?.length) return { _debug: `${prefix}no-tracks keys=${Object.keys(data ?? {}).join(",")}` };
     const track = pickBestTrack(tracks, preferredLangs);
     if (!track?.baseUrl) return { _debug: `${prefix}no-baseUrl tracks=${tracks.length}` };
-    const { xml, err } = await fetchTimedTextXml(track.baseUrl);
+    const { xml, err } = await fetchTimedTextXml(track.baseUrl, budget);
     if (!xml) return { _debug: `${prefix}xml-failed err=${err}` };
     const segments = parseXml(xml);
     if (!segments.length) return { _debug: `${prefix}parse-empty xml_len=${xml.length}` };
@@ -287,10 +348,12 @@ async function tryClient(
 async function fetchTranscriptFromSW(
   videoId: string,
   preferredLangs: string[],
+  budget: AbortSignal,
 ): Promise<{ result: ExtractResult; perClientDebug: string[] }> {
   const perClientDebug: string[] = [];
   for (const client of INNERTUBE_CLIENTS) {
-    const r = await tryClient(videoId, preferredLangs, client);
+    if (budget.aborted) break;
+    const r = await tryClient(videoId, preferredLangs, client, budget);
     perClientDebug.push(r._debug);
     if (r.segments?.length) return { result: r, perClientDebug };
   }
@@ -303,8 +366,14 @@ async function fetchTranscriptFromSW(
 async function fetchTranscriptInPage(
   videoId: string,
   preferredLangs: string[],
+  budgetDeadlineMs: number,
 ): Promise<ExtractResult> {
   const FETCH_TIMEOUT_MS_INNER = 10_000;
+  // Can't carry an AbortSignal across the MAIN-world boundary, so the in-page
+  // ladder self-bounds: never wait/fetch past the caller's per-video deadline.
+  const remainingMs = () => Math.max(0, budgetDeadlineMs - Date.now());
+  const innerTimeout = () =>
+    AbortSignal.timeout(Math.min(FETCH_TIMEOUT_MS_INNER, remainingMs()));
   function pickBestTrack(tracks: any[], langs: string[]): any | null {
     for (const lang of langs) {
       const norm = lang.toLowerCase().split("-")[0];
@@ -344,9 +413,13 @@ async function fetchTranscriptInPage(
   async function fetchXml(baseUrl: string): Promise<{ xml: string | null; err: string }> {
     const delays = [0, 1500, 3000];
     for (let attempt = 0; attempt < delays.length; attempt++) {
-      if (delays[attempt]) await new Promise<void>((r) => setTimeout(r, delays[attempt]));
+      if (remainingMs() <= 0) return { xml: null, err: "budget" };
+      if (delays[attempt]) {
+        if (delays[attempt] >= remainingMs()) return { xml: null, err: "budget" };
+        await new Promise<void>((r) => setTimeout(r, delays[attempt]));
+      }
       try {
-        const res = await fetch(baseUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS_INNER) });
+        const res = await fetch(baseUrl, { signal: innerTimeout() });
         if (res.status === 429) continue;
         if (!res.ok) return { xml: null, err: `status=${res.status}` };
         const text = await res.text();
@@ -368,7 +441,7 @@ async function fetchTranscriptInPage(
         context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
         videoId,
       }),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS_INNER),
+      signal: innerTimeout(),
     });
     if (res.ok) {
       const data = await res.json();
@@ -465,48 +538,74 @@ async function handleFetchTranscript(
   // idempotent (removeRuleIds + addRules) so paying ~5-50ms here is safe.
   await registerHeaderSpoofRules();
 
-  const { result: sw, perClientDebug } = await fetchTranscriptFromSW(videoId, preferredLangs);
-  if (sw.segments?.length) {
-    return { transcript: buildTranscript(sw), failure_reason: null };
-  }
+  const deadline = Date.now() + PER_VIDEO_BUDGET_MS;
 
-  // Fallback: piggy-back on a YouTube tab if all SW clients returned nothing.
-  const tabId = await getYouTubeTabId();
-  if (!tabId) {
-    const reason = classifyFailure([...perClientDebug, "no-youtube-tab"]);
+  const result = await runWithVideoBudget(async (budget) => {
+    const { result: sw, perClientDebug } = await fetchTranscriptFromSW(
+      videoId,
+      preferredLangs,
+      budget,
+    );
+    if (sw.segments?.length) {
+      return { transcript: buildTranscript(sw), failure_reason: null };
+    }
+
+    // Budget blew during the SW path: bail WITHOUT telemetry. Promise.race has
+    // already resolved to budget_exceeded and the wrapper emits that single
+    // event — firing a no_tab capture here too would double-count this video.
+    if (budget.aborted) {
+      return { transcript: null, failure_reason: "budget_exceeded" };
+    }
+
+    // Fallback: piggy-back on a YouTube tab if all SW clients returned nothing.
+    const tabId = await getYouTubeTabId();
+    if (!tabId) {
+      const reason = classifyFailure([...perClientDebug, "no-youtube-tab"]);
+      void captureSW("transcript_fetch_failed", {
+        video_id: videoId,
+        sw_debug: perClientDebug.join("|"),
+        tab_debug: "no-youtube-tab",
+        failure_reason: reason,
+        preferred_langs: preferredLangs.join(","),
+      });
+      return { transcript: null, failure_reason: reason };
+    }
+    let tab: ExtractResult = { _debug: "tab-not-run" };
+    try {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: fetchTranscriptInPage,
+        args: [videoId, preferredLangs, deadline],
+        world: "MAIN" as chrome.scripting.ExecutionWorld,
+      });
+      tab = res[0]?.result ?? { _debug: "tab-no-result" };
+    } catch (e) {
+      tab = { _debug: `tab-threw=${String(e)}` };
+    }
+    if (tab.segments?.length) {
+      return { transcript: buildTranscript(tab), failure_reason: null };
+    }
+    const reason = classifyFailure([...perClientDebug, tab._debug]);
     void captureSW("transcript_fetch_failed", {
       video_id: videoId,
       sw_debug: perClientDebug.join("|"),
-      tab_debug: "no-youtube-tab",
+      tab_debug: tab._debug,
       failure_reason: reason,
       preferred_langs: preferredLangs.join(","),
     });
     return { transcript: null, failure_reason: reason };
-  }
-  let tab: ExtractResult = { _debug: "tab-not-run" };
-  try {
-    const res = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: fetchTranscriptInPage,
-      args: [videoId, preferredLangs],
-      world: "MAIN" as chrome.scripting.ExecutionWorld,
-    });
-    tab = res[0]?.result ?? { _debug: "tab-no-result" };
-  } catch (e) {
-    tab = { _debug: `tab-threw=${String(e)}` };
-  }
-  if (tab.segments?.length) {
-    return { transcript: buildTranscript(tab), failure_reason: null };
-  }
-  const reason = classifyFailure([...perClientDebug, tab._debug]);
-  void captureSW("transcript_fetch_failed", {
-    video_id: videoId,
-    sw_debug: perClientDebug.join("|"),
-    tab_debug: tab._debug,
-    failure_reason: reason,
-    preferred_langs: preferredLangs.join(","),
   });
-  return { transcript: null, failure_reason: reason };
+
+  if (result.failure_reason === "budget_exceeded") {
+    void captureSW("transcript_fetch_failed", {
+      video_id: videoId,
+      sw_debug: "budget",
+      tab_debug: "budget",
+      failure_reason: "budget_exceeded",
+      preferred_langs: preferredLangs.join(","),
+    });
+  }
+  return result;
 }
 
 chrome.runtime.onMessage.addListener(

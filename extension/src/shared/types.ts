@@ -57,6 +57,7 @@ export type FailureReason =
   | "no_tab"
   | "tab_threw"
   | "tab_failed"
+  | "budget_exceeded"
   | "unknown";
 
 export interface FetchTranscriptResult {

@@ -289,11 +289,14 @@ export function App() {
             const video = queue.shift();
             if (!video) break;
 
-            const txRes = await send({
-              type: "fetch-transcript",
-              videoId: video.id,
-              preferredLangs: [...PREFERRED_TRANSCRIPT_LANGS],
-            });
+            const txRes = await send(
+              {
+                type: "fetch-transcript",
+                videoId: video.id,
+                preferredLangs: [...PREFERRED_TRANSCRIPT_LANGS],
+              },
+              { signal: controller.signal },
+            );
             if (superseded()) return;
             if (!txRes.ok || !txRes.data.transcript) {
               transcriptFailures++;
@@ -314,16 +317,19 @@ export function App() {
             // cached-path stays cold — capture the error so we can spot a
             // broken indexer instead of just seeing low indexed_hits.
             if (resolvedChannelId) {
-              void send({
-                type: "index-transcript",
-                params: {
-                  channel_id: resolvedChannelId,
-                  source_url: channelUrl,
-                  video,
-                  transcript,
+              void send(
+                {
+                  type: "index-transcript",
+                  params: {
+                    channel_id: resolvedChannelId,
+                    source_url: channelUrl,
+                    video,
+                    transcript,
+                  },
                 },
-              }).then((res) => {
-                if (!res.ok) {
+                { signal: controller.signal },
+              ).then((res) => {
+                if (!res.ok && res.error !== "aborted") {
                   posthog.capture("index_transcript_failed", {
                     channel_id: resolvedChannelId,
                     video_id: video.id,
@@ -333,10 +339,10 @@ export function App() {
               });
             }
 
-            const matchRes = await send({
-              type: "match-transcript",
-              params: { keyword, video, transcript },
-            });
+            const matchRes = await send(
+              { type: "match-transcript", params: { keyword, video, transcript } },
+              { signal: controller.signal },
+            );
             if (superseded()) return;
 
             if (matchRes.ok && matchRes.data.match_result) {
