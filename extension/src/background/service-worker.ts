@@ -1,6 +1,22 @@
 // extension/src/background/service-worker.ts
 import { listVideos, matchTranscript, indexTranscript } from "./api-client";
-import type { MessageResponse, Transcript } from "../shared/types";
+import { captureSW, captureExceptionSW } from "./posthog-sw";
+import { classifyFailure } from "./transcript-fetcher";
+import { PREFERRED_TRANSCRIPT_LANGS } from "../shared/constants";
+import type { FetchTranscriptResult, MessageResponse, Transcript } from "../shared/types";
+
+// Global SW error capture. posthog-js can't run here; use the REST helper.
+self.addEventListener("error", (event: ErrorEvent) => {
+  captureExceptionSW(event.error ?? new Error(event.message || "sw error"), {
+    source: "sw.onerror",
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+  });
+});
+self.addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
+  captureExceptionSW(event.reason, { source: "sw.unhandledrejection" });
+});
 
 type Segment = { text: string; start: number; duration: number };
 type ExtractResult = {
@@ -51,13 +67,32 @@ async function registerHeaderSpoofRules(): Promise<void> {
     console.log("[CC] header-spoof rules registered");
   } catch (e) {
     console.warn("[CC] header-spoof rules failed:", e);
+    // declarativeNetRequest failure → YouTube treats fetches as cross-origin,
+    // transcript pipeline silently breaks. Surface so we can correlate against
+    // transcript_fetch_failed reasons.
+    void captureSW("header_spoof_rules_failed", {
+      error_message: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
 const LANDING_BASE = "https://clipchase.xyz";
 
+// Manual open via chrome.action.onClicked so we can instrument the click
+// (popup_open_attempted) and catch open() failures (Arc compat). With the
+// auto-open behavior, onClicked never fires. Set on every SW wake so existing
+// installs pick up the new behavior without waiting for a manifest bump.
+//
+// Forks that don't expose setPanelBehavior (or reject it) silently break the
+// onClicked path — report so we can spot Arc/Brave/Vivaldi quirks instead of
+// flying blind.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch((e) => {
+  void captureSW("set_panel_behavior_failed", {
+    error_message: e instanceof Error ? e.message : String(e),
+  });
+});
+
 chrome.runtime.onInstalled.addListener(async (details) => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   registerHeaderSpoofRules();
 
   // Post-install attribution: only on fresh install, not update/reload.
@@ -82,6 +117,53 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.runtime.onStartup.addListener(registerHeaderSpoofRules);
 // Re-register on every SW wake — session rules don't survive SW termination.
 registerHeaderSpoofRules();
+
+// Lifecycle ping. Fires once per SW boot, including the first start after
+// install. Tells us the background actually came alive on this client —
+// the absence of this for an active person_id is itself a strong signal.
+void captureSW("sw_started", {
+  ua: (self.navigator as Navigator | undefined)?.userAgent ?? null,
+});
+
+// Action click → open side panel. We fire popup_open_attempted *before* the
+// open call so failures (Arc, missing windowId, gesture lost) still appear in
+// PostHog. The delta between `popup_open_attempted` and `extension_opened`
+// (fired from the side panel itself) measures real-world open success rate.
+chrome.action.onClicked.addListener(async (tab) => {
+  const browserHint = (() => {
+    const ua = (self.navigator as Navigator | undefined)?.userAgent ?? "";
+    // Best-effort hints — Arc UA is identical to Chrome's, but UA-CH brands
+    // sometimes leak the rendering host. Keep both for cross-checking.
+    const brands = (self.navigator as Navigator & {
+      userAgentData?: { brands?: { brand: string; version: string }[] };
+    } | undefined)?.userAgentData?.brands;
+    return {
+      ua,
+      ua_data_brands: brands ? brands.map((b) => b.brand).join(",") : null,
+    };
+  })();
+
+  void captureSW("popup_open_attempted", {
+    has_window_id: typeof tab.windowId === "number",
+    tab_url_host: tab.url ? new URL(tab.url).host : null,
+    ...browserHint,
+  });
+
+  try {
+    if (typeof tab.windowId !== "number") {
+      throw new Error("missing windowId on action click");
+    }
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+    void captureSW("popup_open_succeeded", browserHint);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    void captureSW("popup_open_failed", {
+      error_message: message,
+      ...browserHint,
+    });
+    captureExceptionSW(e, { source: "sidePanel.open" });
+  }
+});
 
 // ─── Shared transcript helpers (SW context) ─────────────────────────────────
 // fetchTranscriptInPage below cannot reuse these — executeScript only carries
@@ -153,37 +235,66 @@ async function fetchTimedTextXml(baseUrl: string): Promise<{ xml: string | null;
   return { xml: null, err: "status=429 after retries" };
 }
 
-// Android InnerTube returns track baseUrls without exp=xpe bot-guard — primary path.
-async function fetchTranscriptFromSW(videoId: string, preferredLangs: string[]): Promise<ExtractResult> {
+// InnerTube clients tried in order. ANDROID first (lowest latency, no
+// signatureCipher), IOS second (different bot-detection treatment),
+// WEB_EMBEDDED_PLAYER last. Each client returns its own baseUrl, so this
+// also retries XML fetches that 429'd on the previous client.
+type InnertubeClient = { clientName: string; clientVersion: string };
+
+const INNERTUBE_CLIENTS: InnertubeClient[] = [
+  { clientName: "ANDROID", clientVersion: "20.10.38" },
+  { clientName: "IOS", clientVersion: "20.10.4" },
+  { clientName: "WEB_EMBEDDED_PLAYER", clientVersion: "1.20240101.00.00" },
+];
+
+async function tryClient(
+  videoId: string,
+  preferredLangs: string[],
+  client: InnertubeClient,
+): Promise<ExtractResult> {
+  const prefix = `sw-${client.clientName.toLowerCase()}-`;
   try {
     const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
+        context: { client: { clientName: client.clientName, clientVersion: client.clientVersion } },
         videoId,
       }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return { _debug: `sw-status=${res.status}` };
+    if (!res.ok) return { _debug: `${prefix}status=${res.status}` };
     const data = await res.json();
     const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!tracks?.length) return { _debug: `sw-no-tracks keys=${Object.keys(data ?? {}).join(",")}` };
+    if (!tracks?.length) return { _debug: `${prefix}no-tracks keys=${Object.keys(data ?? {}).join(",")}` };
     const track = pickBestTrack(tracks, preferredLangs);
-    if (!track?.baseUrl) return { _debug: `sw-no-baseUrl tracks=${tracks.length}` };
+    if (!track?.baseUrl) return { _debug: `${prefix}no-baseUrl tracks=${tracks.length}` };
     const { xml, err } = await fetchTimedTextXml(track.baseUrl);
-    if (!xml) return { _debug: `sw-xml-failed err=${err}` };
+    if (!xml) return { _debug: `${prefix}xml-failed err=${err}` };
     const segments = parseXml(xml);
-    if (!segments.length) return { _debug: `sw-parse-empty xml_len=${xml.length}` };
+    if (!segments.length) return { _debug: `${prefix}parse-empty xml_len=${xml.length}` };
     return {
-      _debug: "sw-ok",
+      _debug: `${prefix}ok`,
       segments,
       langCode: track.languageCode,
       isGenerated: track.kind === "asr",
     };
   } catch (e) {
-    return { _debug: `sw-threw=${String(e)}` };
+    return { _debug: `${prefix}threw=${String(e)}` };
   }
+}
+
+async function fetchTranscriptFromSW(
+  videoId: string,
+  preferredLangs: string[],
+): Promise<{ result: ExtractResult; perClientDebug: string[] }> {
+  const perClientDebug: string[] = [];
+  for (const client of INNERTUBE_CLIENTS) {
+    const r = await tryClient(videoId, preferredLangs, client);
+    perClientDebug.push(r._debug);
+    if (r.segments?.length) return { result: r, perClientDebug };
+  }
+  return { result: { _debug: perClientDebug.join("|") }, perClientDebug };
 }
 
 // ─── Tab fallback (runs in MAIN world via executeScript) ────────────────────
@@ -344,26 +455,58 @@ function buildTranscript(extracted: ExtractResult): Transcript | null {
   };
 }
 
-async function handleFetchTranscript(videoId: string, preferredLangs: string[]): Promise<Transcript | null> {
-  let extracted = await fetchTranscriptFromSW(videoId, preferredLangs);
-  console.log("[TS]", videoId, extracted._debug);
-  if (extracted.segments?.length) return buildTranscript(extracted);
+async function handleFetchTranscript(
+  videoId: string,
+  preferredLangs: string[],
+): Promise<FetchTranscriptResult> {
+  // Re-await rule registration on every fetch. SW termination after ~30s idle
+  // drops session rules; the first fetch after wake can race ahead of the
+  // top-level registerHeaderSpoofRules() call. updateSessionRules is
+  // idempotent (removeRuleIds + addRules) so paying ~5-50ms here is safe.
+  await registerHeaderSpoofRules();
 
-  // Fallback: piggy-back on a YouTube tab if SW path returned nothing.
+  const { result: sw, perClientDebug } = await fetchTranscriptFromSW(videoId, preferredLangs);
+  if (sw.segments?.length) {
+    return { transcript: buildTranscript(sw), failure_reason: null };
+  }
+
+  // Fallback: piggy-back on a YouTube tab if all SW clients returned nothing.
   const tabId = await getYouTubeTabId();
   if (!tabId) {
-    console.warn("[TS] no YouTube tab for fallback,", videoId);
-    return null;
+    const reason = classifyFailure([...perClientDebug, "no-youtube-tab"]);
+    void captureSW("transcript_fetch_failed", {
+      video_id: videoId,
+      sw_debug: perClientDebug.join("|"),
+      tab_debug: "no-youtube-tab",
+      failure_reason: reason,
+      preferred_langs: preferredLangs.join(","),
+    });
+    return { transcript: null, failure_reason: reason };
   }
-  const res = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: fetchTranscriptInPage,
-    args: [videoId, preferredLangs],
-    world: "MAIN" as chrome.scripting.ExecutionWorld,
+  let tab: ExtractResult = { _debug: "tab-not-run" };
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: fetchTranscriptInPage,
+      args: [videoId, preferredLangs],
+      world: "MAIN" as chrome.scripting.ExecutionWorld,
+    });
+    tab = res[0]?.result ?? { _debug: "tab-no-result" };
+  } catch (e) {
+    tab = { _debug: `tab-threw=${String(e)}` };
+  }
+  if (tab.segments?.length) {
+    return { transcript: buildTranscript(tab), failure_reason: null };
+  }
+  const reason = classifyFailure([...perClientDebug, tab._debug]);
+  void captureSW("transcript_fetch_failed", {
+    video_id: videoId,
+    sw_debug: perClientDebug.join("|"),
+    tab_debug: tab._debug,
+    failure_reason: reason,
+    preferred_langs: preferredLangs.join(","),
   });
-  extracted = res[0]?.result ?? extracted;
-  console.log("[TS]", videoId, extracted._debug);
-  return buildTranscript(extracted);
+  return { transcript: null, failure_reason: reason };
 }
 
 chrome.runtime.onMessage.addListener(
@@ -378,7 +521,7 @@ chrome.runtime.onMessage.addListener(
           case "fetch-transcript":
             data = await handleFetchTranscript(
               msg.videoId as string,
-              (msg.preferredLangs as string[] | undefined) ?? ["en", "hi"],
+              (msg.preferredLangs as string[] | undefined) ?? [...PREFERRED_TRANSCRIPT_LANGS],
             );
             break;
           case "match-transcript":
@@ -395,6 +538,7 @@ chrome.runtime.onMessage.addListener(
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
         console.error("[TS] error:", message);
+        captureExceptionSW(e, { source: "sw.onMessage", message_type: msg.type });
         sendResponse({ ok: false, error: message } satisfies MessageResponse<never>);
       }
     })();

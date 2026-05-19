@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search } from "lucide-react";
-import { SearchResult, TimeRange, ChannelSuggestion, VideoInfo, SortBy } from "../shared/types";
-import { getPublishedAfterDate } from "../shared/utils";
+import { SearchResult, TimeRange, ChannelSuggestion, VideoInfo, SortBy, FailureReason } from "../shared/types";
+import { getPublishedAfterDate, dominantReason } from "../shared/utils";
 import { send } from "../shared/messaging";
 import { SearchForm } from "../components/SearchForm";
 import { TimeRangeSelector } from "../components/TimeRangeSelector";
@@ -10,6 +10,7 @@ import { SearchResults } from "../components/SearchResults";
 import { LoadingStream } from "../components/LoadingStream";
 import { WelcomeModal } from "../components/WelcomeModal";
 import posthog from "../shared/posthog";
+import { PREFERRED_TRANSCRIPT_LANGS } from "../shared/constants";
 import { detectKeywordScript } from "../lib/keyword-script";
 import { consumeSSE } from "../lib/sse";
 
@@ -211,6 +212,7 @@ export function App() {
     let indexedHits = 0;
     let transcriptFailures = 0;
     let matchCount = 0;
+    const failureReasonCounts: Partial<Record<FailureReason, number>> = {};
 
     try {
       const publishedAfter = getPublishedAfterDate(timeRange);
@@ -290,20 +292,27 @@ export function App() {
             const txRes = await send({
               type: "fetch-transcript",
               videoId: video.id,
-              preferredLangs: ["en", "hi"],
+              preferredLangs: [...PREFERRED_TRANSCRIPT_LANGS],
             });
             if (superseded()) return;
-            if (!txRes.ok || !txRes.data) {
+            if (!txRes.ok || !txRes.data.transcript) {
               transcriptFailures++;
+              const reason: FailureReason = !txRes.ok
+                ? "unknown"
+                : (txRes.data.failure_reason ?? "unknown");
+              failureReasonCounts[reason] = (failureReasonCounts[reason] ?? 0) + 1;
               console.warn(
                 `[ClipChase] transcript skipped for ${video.id}:`,
-                txRes.ok ? "null data" : txRes.error,
+                txRes.ok ? `null (${reason})` : txRes.error,
               );
               continue;
             }
+            const transcript = txRes.data.transcript;
 
             // Fire-and-forget: persist transcript to backend index so future
-            // searches on this channel use the cached path. Errors swallowed.
+            // searches on this channel use the cached path. Failures here mean
+            // cached-path stays cold — capture the error so we can spot a
+            // broken indexer instead of just seeing low indexed_hits.
             if (resolvedChannelId) {
               void send({
                 type: "index-transcript",
@@ -311,14 +320,22 @@ export function App() {
                   channel_id: resolvedChannelId,
                   source_url: channelUrl,
                   video,
-                  transcript: txRes.data,
+                  transcript,
                 },
+              }).then((res) => {
+                if (!res.ok) {
+                  posthog.capture("index_transcript_failed", {
+                    channel_id: resolvedChannelId,
+                    video_id: video.id,
+                    error_message: res.error,
+                  });
+                }
               });
             }
 
             const matchRes = await send({
               type: "match-transcript",
-              params: { keyword, video, transcript: txRes.data },
+              params: { keyword, video, transcript },
             });
             if (superseded()) return;
 
@@ -377,6 +394,7 @@ export function App() {
             ? Math.round((videosWithTranscript / videosScanned) * 1000) / 10
             : null;
         const hadAnyTranscript = videosWithTranscript > 0;
+        const transcriptFailureReasonTop = dominantReason(failureReasonCounts);
         posthog.capture("search_completed", {
           channel: channelUrl,
           keyword,
@@ -389,6 +407,7 @@ export function App() {
           transcript_failures: transcriptFailures,
           transcript_coverage_pct: transcriptCoveragePct,
           had_any_transcript: hadAnyTranscript,
+          transcript_failure_reason_top: transcriptFailureReasonTop,
           success: !searchFailed,
           duration_ms: Date.now() - searchStartedAt,
         });
@@ -408,10 +427,12 @@ export function App() {
             transcript_failures: transcriptFailures,
             transcript_coverage_pct: transcriptCoveragePct,
             had_any_transcript: hadAnyTranscript,
+            transcript_failure_reason_top: transcriptFailureReasonTop,
           });
           posthog.capture("zero_results_shown", {
             keyword_script: detectKeywordScript(keyword),
             had_any_transcript: hadAnyTranscript,
+            transcript_failure_reason_top: transcriptFailureReasonTop,
           });
         } else if (matchCount > 0) {
           posthog.capture("results_shown", {

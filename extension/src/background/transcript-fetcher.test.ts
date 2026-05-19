@@ -1,6 +1,6 @@
 // extension/src/background/transcript-fetcher.test.ts
 import { describe, it, expect } from "vitest";
-import { pickTrack, parseSegments, normalizeLanguageCode, type CaptionTrack } from "./transcript-fetcher";
+import { pickTrack, parseSegments, normalizeLanguageCode, classifyFailure, type CaptionTrack } from "./transcript-fetcher";
 
 // ── normalizeLanguageCode ─────────────────────────────────────────────────────
 
@@ -118,5 +118,61 @@ describe("parseSegments", () => {
   it("returns empty array for empty XML", () => {
     expect(parseSegments("")).toHaveLength(0);
     expect(parseSegments("<transcript></transcript>")).toHaveLength(0);
+  });
+});
+
+// ── classifyFailure ───────────────────────────────────────────────────────────
+
+describe("classifyFailure", () => {
+  it("classifies no-tab when last entry is no-youtube-tab", () => {
+    expect(classifyFailure(["sw-android-no-tracks keys=x", "no-youtube-tab"])).toBe("no_tab");
+  });
+
+  it("classifies tab_threw when last entry starts with tab-threw", () => {
+    expect(classifyFailure(["sw-android-status=403", "tab-threw=Error: boom"])).toBe("tab_threw");
+  });
+
+  it("classifies tab_failed for any other tab- prefix", () => {
+    expect(classifyFailure(["sw-android-status=403", "tab-no-tracks"])).toBe("tab_failed");
+    expect(classifyFailure(["sw-android-status=403", "tab-android-no-baseUrl tracks=1"])).toBe("tab_failed");
+  });
+
+  it("classifies sw_blocked for InnerTube non-ok status", () => {
+    expect(classifyFailure(["sw-android-status=403"])).toBe("sw_blocked");
+    expect(classifyFailure(["sw-ios-status=429"])).toBe("sw_blocked");
+  });
+
+  it("classifies sw_no_tracks", () => {
+    expect(classifyFailure(["sw-android-no-tracks keys=playabilityStatus"])).toBe("sw_no_tracks");
+  });
+
+  it("classifies sw_no_baseurl", () => {
+    expect(classifyFailure(["sw-ios-no-baseUrl tracks=2"])).toBe("sw_no_baseurl");
+  });
+
+  it("classifies xml_429 when xml-failed err contains 429", () => {
+    expect(classifyFailure(["sw-android-xml-failed err=status=429 after retries"])).toBe("xml_429");
+  });
+
+  it("classifies xml_status_err for other xml-failed statuses", () => {
+    expect(classifyFailure(["sw-web_embedded_player-xml-failed err=status=500"])).toBe("xml_status_err");
+    expect(classifyFailure(["sw-android-xml-failed err=threw=TypeError"])).toBe("xml_status_err");
+  });
+
+  it("classifies parse_empty", () => {
+    expect(classifyFailure(["sw-android-parse-empty xml_len=42"])).toBe("parse_empty");
+  });
+
+  it("classifies sw_threw", () => {
+    expect(classifyFailure(["sw-ios-threw=AbortError"])).toBe("sw_threw");
+  });
+
+  it("classifies unknown for unrecognised debug strings", () => {
+    expect(classifyFailure([])).toBe("unknown");
+    expect(classifyFailure(["something-else"])).toBe("unknown");
+  });
+
+  it("uses only the last entry for classification", () => {
+    expect(classifyFailure(["sw-android-status=403", "sw-ios-status=403", "sw-web_embedded_player-no-tracks keys=x"])).toBe("sw_no_tracks");
   });
 });

@@ -46,6 +46,24 @@ export interface Transcript {
   segments: TranscriptSegment[];
 }
 
+export type FailureReason =
+  | "sw_blocked"
+  | "sw_no_tracks"
+  | "sw_no_baseurl"
+  | "xml_429"
+  | "xml_status_err"
+  | "parse_empty"
+  | "sw_threw"
+  | "no_tab"
+  | "tab_threw"
+  | "tab_failed"
+  | "unknown";
+
+export interface FetchTranscriptResult {
+  transcript: Transcript | null;
+  failure_reason: FailureReason | null;
+}
+
 // ── Message types for chrome.runtime.sendMessage ──────────────────────────────
 
 export type ExtMessage =
