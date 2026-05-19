@@ -12,7 +12,7 @@ YOUTUBE_API_VERSION = "v3"
 # Caches resolved channel IDs to keep YT API quota down when the same handle
 # is hit repeatedly (e.g. /api/index/transcript per-video on a fresh channel).
 _RESOLVE_NAME_CACHE: Dict[str, str] = {}
-SUPPORTED_TRANSCRIPT_LANGUAGES = ("en", "hi")
+SUPPORTED_TRANSCRIPT_LANGUAGES = ("en", "hi", "fr", "es", "pt")
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 DEVANAGARI_TOKEN_RE = re.compile(r"[\u0900-\u097F]+")
 LATIN_WORD_RE = re.compile(r"[A-Za-z0-9]")
@@ -53,6 +53,9 @@ def language_label_for_code(language_code: str, fallback: Optional[str] = None) 
     labels = {
         "en": "English",
         "hi": "Hindi",
+        "fr": "French",
+        "es": "Spanish",
+        "pt": "Portuguese",
     }
     return labels.get(language_code, fallback or language_code.upper() or "Unknown")
 
@@ -62,6 +65,15 @@ def _normalize_text(text: str) -> str:
     normalized = normalized.replace("\u200c", "").replace("\u200d", "")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _strip_diacritics(text: str) -> str:
+    # Decompose then drop combining marks so "M\u00e9xico" -> "Mexico", "caf\u00e9" ->
+    # "cafe". Applied only to latin-script matching paths; Devanagari uses
+    # matras (combining marks) for vowels so stripping there would corrupt the
+    # script. Keep this off the Hindi branch in _keyword_matches.
+    decomposed = unicodedata.normalize("NFD", text or "")
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
 def _is_devanagari_text(text: str) -> bool:
@@ -302,8 +314,10 @@ def _keyword_matches(text: str, keyword: str, language_code: str) -> bool:
         return True
 
     if LATIN_WORD_RE.search(normalized_keyword):
-        escaped = re.escape(normalized_keyword.casefold())
-        lowered_text = normalized_text.casefold()
+        # Strip diacritics so French/Spanish/Portuguese accented forms match
+        # unaccented user queries ("mexico" -> "México", "futbol" -> "fútbol").
+        escaped = re.escape(_strip_diacritics(normalized_keyword.casefold()))
+        lowered_text = _strip_diacritics(normalized_text.casefold())
         if bool(re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", lowered_text)):
             return True
 

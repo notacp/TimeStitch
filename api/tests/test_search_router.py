@@ -62,7 +62,7 @@ def test_search_router_success(mock_yt_service_class):
     assert data[0]["search_terms_used"] == ["mock"]
     assert data[0]["matches"][0]["text"] == "mock match"
     assert mock_service.get_transcript.call_count == 1
-    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["en", "hi"])
+    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["en", "hi", "fr", "es", "pt"])
     mock_service.search_in_transcript.assert_called_once_with(
         [{"start": 0, "text": "mock transcript"}],
         ["mock"],
@@ -96,7 +96,7 @@ def test_search_router_uses_romanized_variant_for_devanagari_query(mock_yt_servi
     data = parse_sse_results(response)
     assert data[0]["search_terms_used"] == ["स्टार्टअप", "staartapa"]
     assert mock_service.get_transcript.call_count == 1
-    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["hi", "en"])
+    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["hi", "en", "fr", "es", "pt"])
     mock_service.search_in_transcript.assert_called_once_with(
         [{"start": 0, "text": "startup"}],
         ["स्टार्टअप", "staartapa"],
@@ -130,7 +130,7 @@ def test_search_router_keeps_latin_query_without_translation(mock_yt_service_cla
     data = parse_sse_results(response)
     assert data[0]["search_terms_used"] == ["startup", "स्टार्टअप"]
     assert mock_service.get_transcript.call_count == 1
-    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["en", "hi"])
+    mock_service.get_transcript.assert_called_with("vid1", preferred_languages=["en", "hi", "fr", "es", "pt"])
     mock_service.search_in_transcript.assert_called_once_with(
         [{"start": 0, "text": "स्टार्टअप"}],
         ["startup", "स्टार्टअप"],
@@ -179,8 +179,8 @@ def test_search_router_falls_back_to_hindi_track_when_english_track_misses(mock_
     assert data[0]["transcript_language_code"] == "hi"
     assert data[0]["search_terms_used"] == ["invest", "इन्वेस्ट"]
     assert mock_service.get_transcript.call_args_list == [
-        (("vid1",), {"preferred_languages": ["en", "hi"]}),
-        (("vid1",), {"preferred_languages": ["hi", "en"]}),
+        (("vid1",), {"preferred_languages": ["en", "hi", "fr", "es", "pt"]}),
+        (("vid1",), {"preferred_languages": ["hi", "en", "fr", "es", "pt"]}),
     ]
     assert mock_service.search_in_transcript.call_args_list[0].kwargs["transcript_language"] == "en"
     assert mock_service.search_in_transcript.call_args_list[1].kwargs["transcript_language"] == "hi"

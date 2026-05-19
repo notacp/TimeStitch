@@ -9,10 +9,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..services.transcript_index import TranscriptIndexService
-from ..services.youtube import YouTubeService, human_script_variants, normalize_language_code
+from ..services.youtube import (
+    SUPPORTED_TRANSCRIPT_LANGUAGES as SUPPORTED_SEARCH_LANGUAGES,
+    YouTubeService,
+    human_script_variants,
+    normalize_language_code,
+)
 
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
-SUPPORTED_SEARCH_LANGUAGES = ("en", "hi")
 
 
 def detect_query_language(keyword: str) -> str:

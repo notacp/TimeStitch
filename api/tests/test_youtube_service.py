@@ -6,7 +6,11 @@ from api.app.services.youtube import (
     YouTubeService,
     _romanized_forms_similar,
     _cross_script_phonetic_match,
+    _phonetic_key,
+    _collapse_long_vowels,
+    _drop_trailing_schwa,
 )
+from api.app.services.transcript_index import _build_search_text
 
 ENGLISH_TRANSCRIPT = [
     {"start": 1.0, "duration": 2.5, "text": "Welcome to the video"},
@@ -245,3 +249,137 @@ def test_cross_script_match_latin_keyword_rejects_unrelated_devanagari():
 def test_cross_script_match_devanagari_keyword_matches_latin_text():
     # Reverse direction: Hindi keyword "स्टार्टअप" vs English caption
     assert _cross_script_phonetic_match("We are building a startup", "स्टार्टअप") is True
+
+
+# ---------------------------------------------------------------------------
+# Phonetic key helpers — collapse long vowels + drop trailing schwa
+# ---------------------------------------------------------------------------
+
+def test_collapse_long_vowels_collapses_doubled_vowels():
+    assert _collapse_long_vowels("staartaapa") == "startapa"
+    assert _collapse_long_vowels("seee") == "se"
+    assert _collapse_long_vowels("loop") == "lop"
+
+
+def test_collapse_long_vowels_leaves_single_vowels_alone():
+    assert _collapse_long_vowels("startup") == "startup"
+    assert _collapse_long_vowels("hello") == "hello"
+
+
+def test_drop_trailing_schwa_drops_after_stop_consonants():
+    assert _drop_trailing_schwa("startapa") == "startap"
+    assert _drop_trailing_schwa("nama") == "nam"
+
+
+def test_drop_trailing_schwa_does_not_drop_after_y():
+    # Hindi -ya endings (kiya, maya, gaya) keep their final a.
+    assert _drop_trailing_schwa("kiya") == "kiya"
+    assert _drop_trailing_schwa("maya") == "maya"
+    assert _drop_trailing_schwa("gaya") == "gaya"
+
+
+def test_drop_trailing_schwa_only_acts_on_word_end():
+    assert _drop_trailing_schwa("namaste") == "namaste"
+    assert _drop_trailing_schwa("kar") == "kar"
+
+
+def test_phonetic_key_brings_loanword_and_devanagari_closer():
+    en = _phonetic_key("startup")
+    hi = _phonetic_key("स्टार्टअप")
+    # They are not literally equal, but close enough for fuzzy match.
+    assert _romanized_forms_similar(en, hi) or _romanized_forms_similar(hi, en)
+
+
+def test_phonetic_key_namaste_round_trip():
+    assert _phonetic_key("namaste") == _phonetic_key("नमस्ते")
+
+
+# ---------------------------------------------------------------------------
+# Sliding-window phrase matching
+# ---------------------------------------------------------------------------
+
+def test_phrase_match_within_single_segment():
+    service = YouTubeService(api_key="fake-key")
+    transcript = [
+        {"start": 0.0, "duration": 1.0, "text": "machine learning is fun"},
+    ]
+    matches = service.search_in_transcript(transcript, ["machine learning"], "en")
+    assert len(matches) == 1
+    assert matches[0]["start"] == 0.0
+
+
+def test_phrase_match_across_two_segments_anchors_at_phrase_head():
+    service = YouTubeService(api_key="fake-key")
+    transcript = [
+        {"start": 0.0, "duration": 1.0, "text": "this is a"},
+        {"start": 1.0, "duration": 1.0, "text": "machine"},
+        {"start": 2.0, "duration": 1.0, "text": "learning"},
+        {"start": 3.0, "duration": 1.0, "text": "tutorial"},
+    ]
+    matches = service.search_in_transcript(transcript, ["machine learning"], "en")
+    assert len(matches) == 1
+    # End-of-run anchor: timestamp lands on the segment containing the start
+    # of the phrase, not on the leading filler.
+    assert matches[0]["start"] == 1.0
+    assert matches[0]["text"] == "machine"
+
+
+def test_phrase_match_absent_returns_no_results():
+    service = YouTubeService(api_key="fake-key")
+    transcript = [
+        {"start": 0.0, "duration": 1.0, "text": "machine"},
+        {"start": 1.0, "duration": 1.0, "text": "is awesome"},
+    ]
+    matches = service.search_in_transcript(transcript, ["machine learning"], "en")
+    assert matches == []
+
+
+def test_single_and_phrase_keywords_emit_distinct_anchors():
+    service = YouTubeService(api_key="fake-key")
+    transcript = [
+        {"start": 0.0, "duration": 1.0, "text": "cursor rocks"},
+        {"start": 1.0, "duration": 1.0, "text": "and machine"},
+        {"start": 2.0, "duration": 1.0, "text": "learning is great"},
+    ]
+    matches = service.search_in_transcript(
+        transcript, ["cursor", "machine learning"], "en"
+    )
+    starts = sorted(m["start"] for m in matches)
+    assert starts == [0.0, 1.0]
+
+
+def test_phrase_match_does_not_duplicate_for_overlapping_windows():
+    service = YouTubeService(api_key="fake-key")
+    # "machine learning" appears once but window [0..2] and [1..2] both contain it.
+    transcript = [
+        {"start": 0.0, "duration": 1.0, "text": "intro"},
+        {"start": 1.0, "duration": 1.0, "text": "machine learning"},
+        {"start": 2.0, "duration": 1.0, "text": "outro"},
+    ]
+    matches = service.search_in_transcript(transcript, ["machine learning"], "en")
+    assert len(matches) == 1
+    assert matches[0]["start"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# _build_search_text — index-side script bridging
+# ---------------------------------------------------------------------------
+
+def test_build_search_text_emits_phonetic_key_for_latin_loanword():
+    text = _build_search_text("we built a startup")
+    # Original normalized text included plus its phonetic key.
+    assert "startup" in text
+
+
+def test_build_search_text_emits_romanized_and_key_for_devanagari():
+    text = _build_search_text("मेरा स्टार्टअप बड़ा है")
+    # Romanized form ("staartaapa") and phonetic key ("startap") are both present.
+    assert "staartaapa" in text
+    assert "startap" in text
+
+
+def test_build_search_text_returns_normalized_when_no_additions():
+    text = _build_search_text("the quick brown fox")
+    # All-Latin tokens with no doubled vowels and no trailing schwa: keys equal
+    # original tokens, so additions just duplicate them — that's acceptable.
+    assert text.startswith("the quick brown fox")
