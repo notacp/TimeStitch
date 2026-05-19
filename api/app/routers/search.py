@@ -205,30 +205,38 @@ def _get_indexed_match(
     keyword: str,
     preferred_language_orders: Sequence[Sequence[str]],
 ) -> Optional[SearchResult]:
-    tried_transcript_languages = set()
+    # Resolve the languages this video actually has in ONE round-trip, then
+    # fetch only those. The old nested loop called get_transcript() for every
+    # (order x language) combination — up to ~25 Turso HTTP connections per
+    # video; adding fr/es/pt (151ec1d) silently turned ~4 into ~25.
+    stored = {normalize_language_code(code) for code in index_service.get_indexed_languages(video["id"])}
+    stored.discard("")
+    if not stored:
+        return None
 
-    for language_order in preferred_language_orders:
-        for language in language_order:
-            transcript_data = index_service.get_transcript(video["id"], language)
-            if not transcript_data or not transcript_data.get("segments"):
-                continue
+    # preferred_language_orders[0] is already [query_lang, ...all others] in
+    # priority order; the remaining orders are redundant permutations for the
+    # indexed path. Try stored languages by that priority, each fetched once.
+    priority = [normalize_language_code(code) for code in preferred_language_orders[0]]
+    ordered = [code for code in priority if code in stored]
+    ordered += [code for code in stored if code not in ordered]
 
-            transcript_language = normalize_language_code(transcript_data.get("language_code"))
-            if transcript_language in tried_transcript_languages:
-                continue
+    for language in ordered:
+        transcript_data = index_service.get_transcript(video["id"], language)
+        if not transcript_data or not transcript_data.get("segments"):
+            continue
 
-            tried_transcript_languages.add(transcript_language)
-            match_result = _build_match_result(
-                service=service,
-                keyword=keyword,
-                video_id=video["id"],
-                title=video["title"],
-                published_at=video["publishedAt"],
-                thumbnail=video["thumbnail"],
-                transcript_data=transcript_data,
-            )
-            if match_result:
-                return match_result
+        match_result = _build_match_result(
+            service=service,
+            keyword=keyword,
+            video_id=video["id"],
+            title=video["title"],
+            published_at=video["publishedAt"],
+            thumbnail=video["thumbnail"],
+            transcript_data=transcript_data,
+        )
+        if match_result:
+            return match_result
 
     return None
 

@@ -446,6 +446,26 @@ class TranscriptIndexService:
         finally:
             conn.close()
 
+    def get_indexed_languages(self, video_id: str) -> Set[str]:
+        """Languages actually stored for a video, in ONE round-trip.
+
+        _get_indexed_match used to brute-force get_transcript() across every
+        (preferred-order x language) combination — up to ~25 calls per video,
+        each a fresh Turso HTTP connection + 2 queries. Callers should resolve
+        the stored language set first, then fetch only those.
+        """
+        if not video_id:
+            return set()
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT language_code FROM indexed_transcripts WHERE video_id = ?",
+                (video_id,),
+            ).fetchall()
+            return {row["language_code"] for row in rows}
+        finally:
+            conn.close()
+
     def find_candidate_video_ids(self, video_ids: Sequence[str], search_terms: Sequence[str]) -> Set[str]:
         cleaned_terms = [_normalize_text(term) for term in search_terms if _normalize_text(term)]
         if not video_ids or not cleaned_terms:
